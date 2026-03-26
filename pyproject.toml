@@ -98,13 +98,10 @@ packages = ["clicomp"]
 [tool.hatch.build.targets.wheel.sources]
 "clicomp" = "clicomp"
 
-[tool.hatch.build.targets.wheel.force-include]
-"bridge" = "clicomp/bridge"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "clicomp/",
-    "bridge/",
     "README.md",
     "LICENSE",
 ]

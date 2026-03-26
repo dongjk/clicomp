@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "clicomp.cli.commands",
+            "console": "integratedTerminal",
+            "args": [
+                "agent",
+                "-m",
+                "hi"
+            ],
+            "justMyCode": true
+        }
+    ]
+}
