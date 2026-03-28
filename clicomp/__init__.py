@@ -1,6 +1,6 @@
 """
-clicomp - A lightweight AI agent framework
+clicomp - task composer
 """
 
-__version__ = "0.1.4.post5"
-__logo__ = "🐈"
+__version__ = "0.1.0"
+__logo__ = "🤖"

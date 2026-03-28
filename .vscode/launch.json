@@ -9,6 +9,8 @@
             "console": "integratedTerminal",
             "args": [
                 "agent",
+                "-s",
+                "aaa",
                 "-m",
                 "hi"
             ],
