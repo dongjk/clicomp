@@ -388,8 +388,11 @@ def _make_provider(config: Config):
 
     # --- validation ---
     if backend == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
+        use_managed_identity = bool(p and p.use_managed_identity)
+        has_api_key = bool(p and p.api_key)
+        has_api_base = bool(p and p.api_base)
+        if not p or not has_api_base or (not use_managed_identity and not has_api_key):
+            console.print("[red]Error: Azure OpenAI requires api_base and either api_key or managed identity.[/red]")
             console.print("Set them in ~/.clicomp/config.json under providers.azure_openai section")
             console.print("Use the model field to specify the deployment name.")
             raise typer.Exit(1)
@@ -411,6 +414,8 @@ def _make_provider(config: Config):
             api_key=p.api_key,
             api_base=p.api_base,
             default_model=model,
+            use_managed_identity=p.use_managed_identity if p else False,
+            managed_identity_client_id=p.managed_identity_client_id if p else None,
         )
     elif backend == "anthropic":
         from clicomp.providers.anthropic_provider import AnthropicProvider

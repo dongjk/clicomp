@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -33,17 +34,24 @@ class AzureOpenAIProvider(LLMProvider):
         api_key: str = "",
         api_base: str = "",
         default_model: str = "gpt-5.2-chat",
+        use_managed_identity: bool = False,
+        managed_identity_client_id: str | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.api_version = "2024-10-21"
-        
+        self.use_managed_identity = use_managed_identity
+        self.managed_identity_client_id = managed_identity_client_id
+        self._aad_token_cache: str | None = None
+        self._aad_token_expires_at: float = 0
+        self._credential: Any | None = None
+
         # Validate required parameters
-        if not api_key:
-            raise ValueError("Azure OpenAI api_key is required")
         if not api_base:
             raise ValueError("Azure OpenAI api_base is required")
-        
+        if not use_managed_identity and not api_key:
+            raise ValueError("Azure OpenAI api_key is required when managed identity is disabled")
+
         # Ensure api_base ends with /
         if not api_base.endswith('/'):
             api_base += '/'
@@ -63,13 +71,42 @@ class AzureOpenAIProvider(LLMProvider):
         )
         return f"{url}?api-version={self.api_version}"
 
+    def _get_bearer_token(self) -> str:
+        """Get Azure AD bearer token for Cognitive Services scope."""
+        now = time.time()
+        if self._aad_token_cache and now < self._aad_token_expires_at - 60:
+            return self._aad_token_cache
+
+        try:
+            from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
+        except ImportError as exc:
+            raise RuntimeError(
+                "azure-identity is required for Azure Managed Identity auth. "
+                "Install it with: uv add azure-identity"
+            ) from exc
+
+        if self.managed_identity_client_id:
+            credential: Any = ManagedIdentityCredential(client_id=self.managed_identity_client_id)
+        else:
+            credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
+
+        token = credential.get_token("https://cognitiveservices.azure.com/.default")
+        self._credential = credential
+        self._aad_token_cache = token.token
+        self._aad_token_expires_at = float(getattr(token, "expires_on", 0) or 0)
+        return token.token
+
     def _build_headers(self) -> dict[str, str]:
-        """Build headers for Azure OpenAI API with api-key header."""
-        return {
+        """Build headers for Azure OpenAI API with api-key or bearer auth."""
+        headers = {
             "Content-Type": "application/json",
-            "api-key": self.api_key,  # Azure OpenAI uses api-key header, not Authorization
             "x-session-affinity": uuid.uuid4().hex,  # For cache locality
         }
+        if self.use_managed_identity:
+            headers["Authorization"] = f"Bearer {self._get_bearer_token()}"
+        else:
+            headers["api-key"] = self.api_key  # Azure OpenAI uses api-key header, not Authorization
+        return headers
 
     @staticmethod
     def _supports_temperature(

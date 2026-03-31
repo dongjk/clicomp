@@ -56,6 +56,8 @@ class ProviderConfig(Base):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    use_managed_identity: bool = False  # Azure OpenAI: authenticate with Azure AD instead of api-key
+    managed_identity_client_id: str | None = None  # Optional user-assigned managed identity client id
 
 
 class ProvidersConfig(Base):
