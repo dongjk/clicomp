@@ -19,10 +19,13 @@ def set_config_path(path: Path) -> None:
 
 
 def get_config_path() -> Path:
-    """Get the configuration file path."""
+    """Get the configuration file path.
+
+    Default to the current working directory so each checkout owns its own config.
+    """
     if _current_config_path:
         return _current_config_path
-    return Path.home() / ".clicomp" / "config.json"
+    return Path.cwd() / ".clicomp" / "config.json"
 
 
 def load_config(config_path: Path | None = None) -> Config:
