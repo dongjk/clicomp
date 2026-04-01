@@ -245,6 +245,7 @@ def build_status_content(
     context_window_tokens: int,
     session_msg_count: int,
     context_tokens_estimate: int,
+    reasoning_effort: str | None = None,
 ) -> str:
     """Build a human-readable runtime status snapshot."""
     uptime_s = int(time.time() - start_time)
@@ -262,6 +263,7 @@ def build_status_content(
     return "\n".join([
         f"\U0001f408 clicomp v{version}",
         f"\U0001f9e0 Model: {model}",
+        f"\U0001f914 Thinking: {reasoning_effort or 'none'}",
         f"\U0001f4ca Tokens: {last_in} in / {last_out} out",
         f"\U0001f4da Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}%)",
         f"\U0001f4ac Session: {session_msg_count} messages",

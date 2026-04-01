@@ -9,7 +9,32 @@ import sys
 from clicomp import __version__
 from clicomp.bus.events import OutboundMessage
 from clicomp.command.router import CommandContext, CommandRouter
+from clicomp.providers.base import GenerationSettings
 from clicomp.utils.helpers import build_status_content
+
+
+def _available_models(loop) -> list[str]:
+    """Return configured model candidates for interactive model switching."""
+    models: list[str] = []
+
+    current = getattr(loop, "model", "")
+    if current:
+        models.append(current)
+
+    provider = getattr(loop, "provider", None)
+    default_model_getter = getattr(provider, "get_default_model", None)
+    if callable(default_model_getter):
+        default_model = default_model_getter()
+        if default_model and default_model not in models:
+            models.append(default_model)
+
+    registry = getattr(provider, "spec", None)
+    if registry is not None:
+        for name, _ in getattr(registry, "model_overrides", ()):
+            if name and name not in models:
+                models.append(name)
+
+    return models
 
 
 async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
@@ -61,6 +86,7 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
             context_window_tokens=loop.context_window_tokens,
             session_msg_count=len(session.get_history(max_messages=0)),
             context_tokens_estimate=ctx_est,
+            reasoning_effort=loop.provider.generation.reasoning_effort,
         ),
         metadata={"render_as": "text"},
     )
@@ -82,6 +108,87 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_model(ctx: CommandContext) -> OutboundMessage:
+    """List available models or switch to a selected model."""
+    loop = ctx.loop
+    msg = ctx.msg
+    requested = (ctx.args or "").strip()
+
+    if not requested:
+        models = _available_models(loop)
+        lines = [f"Current model: {loop.model}"]
+        if models:
+            lines.append("")
+            lines.append("Available models:")
+            lines.extend(
+                f"- {name}{' (current)' if name == loop.model else ''}"
+                for name in models
+            )
+        else:
+            lines.append("")
+            lines.append("No configured model list found. Use /model <name> to switch directly.")
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="\n".join(lines),
+            metadata={"render_as": "text"},
+        )
+
+    loop.model = requested
+    if hasattr(loop, "subagents") and loop.subagents:
+        loop.subagents.model = requested
+    if hasattr(loop, "memory_consolidator") and loop.memory_consolidator:
+        loop.memory_consolidator.model = requested
+
+    return OutboundMessage(
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        content=f"Model switched to: {requested}",
+        metadata={"render_as": "text"},
+    )
+
+
+async def cmd_think(ctx: CommandContext) -> OutboundMessage:
+    """Show or update the provider reasoning effort."""
+    loop = ctx.loop
+    msg = ctx.msg
+    requested = (ctx.args or "").strip().lower()
+    current = loop.provider.generation.reasoning_effort
+    allowed = {"none", "low", "medium", "high"}
+
+    if not requested:
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                f"Current reasoning: {current or 'none'}\n"
+                "Usage: /think <none|low|medium|high>"
+            ),
+            metadata={"render_as": "text"},
+        )
+
+    if requested not in allowed:
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="Invalid reasoning level. Use one of: none, low, medium, high.",
+            metadata={"render_as": "text"},
+        )
+
+    loop.provider.generation = GenerationSettings(
+        temperature=loop.provider.generation.temperature,
+        max_tokens=loop.provider.generation.max_tokens,
+        reasoning_effort=None if requested == "none" else requested,
+    )
+
+    return OutboundMessage(
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        content=f"Reasoning set to: {requested}",
+        metadata={"render_as": "text"},
+    )
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     lines = [
@@ -90,6 +197,10 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/stop — Stop the current task",
         "/restart — Restart the bot",
         "/status — Show bot status",
+        "/model — List models or switch model",
+        "/model <name> — Switch to a model",
+        "/think — Show current reasoning level",
+        "/think <none|low|medium|high> — Set reasoning level",
         "/help — Show available commands",
     ]
     return OutboundMessage(
@@ -108,3 +219,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/new", cmd_new)
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
+    router.exact("/model", cmd_model)
+    router.prefix("/model ", cmd_model)
+    router.exact("/think", cmd_think)
+    router.prefix("/think ", cmd_think)
