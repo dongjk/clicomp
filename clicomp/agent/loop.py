@@ -236,10 +236,13 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+            logger.info("Agent loop iteration {} started (session={}, channel={}, chat_id={})", iteration, message_id or "-", channel, chat_id)
 
             tool_defs = self.tools.get_definitions()
+            logger.info("Agent loop iteration {} tool count: {}", iteration, len(tool_defs))
 
             if on_stream:
+                logger.info("Agent loop iteration {} calling provider in streaming mode", iteration)
                 response = await self.provider.chat_stream_with_retry(
                     messages=messages,
                     tools=tool_defs,
@@ -258,6 +261,10 @@ class AgentLoop:
                 "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
                 "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
             }
+            logger.info(
+                "Agent loop iteration {} provider returned: finish_reason={}, tool_calls={}, content_len={}",
+                iteration, response.finish_reason, len(response.tool_calls), len(response.content or ""),
+            )
 
             if response.has_tool_calls:
                 if on_stream and on_stream_end:
@@ -296,6 +303,7 @@ class AgentLoop:
                 # independent calls in a single response on purpose.
                 # return_exceptions=True ensures all results are collected
                 # even if one tool is cancelled or raises BaseException.
+                logger.info("Agent loop iteration {} executing {} tool call(s)", iteration, len(response.tool_calls))
                 results = await asyncio.gather(*(
                     self.tools.execute(tc.name, tc.arguments)
                     for tc in response.tool_calls
@@ -303,7 +311,10 @@ class AgentLoop:
 
                 for tool_call, result in zip(response.tool_calls, results):
                     if isinstance(result, BaseException):
+                        logger.warning("Agent loop iteration {} tool {} raised {}", iteration, tool_call.name, type(result).__name__)
                         result = f"Error: {type(result).__name__}: {result}"
+                    else:
+                        logger.info("Agent loop iteration {} tool {} completed", iteration, tool_call.name)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
