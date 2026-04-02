@@ -409,11 +409,12 @@ class AgentLoop:
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
                 raise
-            except Exception:
+            except Exception as e:
                 logger.exception("Error processing message for session {}", msg.session_key)
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content="Sorry, I encountered an error.",
+                    content=f"Sorry, I encountered an error: {type(e).__name__}: {e}",
+                    metadata={"_error": True},
                 ))
 
     async def close_mcp(self) -> None:

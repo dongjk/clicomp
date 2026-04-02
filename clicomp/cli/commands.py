@@ -626,6 +626,15 @@ def agent(
                                 await _print_interactive_progress_line(msg.content, _thinking)
                             continue
 
+                        if msg.metadata.get("_error"):
+                            turn_done.set()
+                            await _print_interactive_response(
+                                msg.content,
+                                render_markdown=markdown,
+                                metadata={"render_as": "text"},
+                            )
+                            continue
+
                         if not turn_done.is_set():
                             if msg.content:
                                 turn_response.append((msg.content, dict(msg.metadata or {})))
