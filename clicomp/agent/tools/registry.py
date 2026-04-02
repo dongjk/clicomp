@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from loguru import logger
+
 from clicomp.agent.tools.base import Tool
 
 
@@ -44,13 +46,18 @@ class ToolRegistry:
             return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
 
         try:
-            # Attempt to cast parameters to match schema types
             params = tool.cast_params(params)
-            
-            # Validate parameters
+
             errors = tool.validate_params(params)
             if errors:
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
+
+            if name in {"exec", "shell"} and isinstance(params, dict):
+                command = str(params.get("command", ""))
+                if self._blocked_privileged_command(command):
+                    logger.warning("Blocked privileged shell command in tool {}: {}", name, command[:200])
+                    return "Error: Privileged shell escalation is blocked (sudo/su/doas not allowed)" + _HINT
+
             result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
                 return result + _HINT
@@ -62,6 +69,13 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         """Get list of registered tool names."""
         return list(self._tools.keys())
+
+    @staticmethod
+    def _blocked_privileged_command(command: str) -> bool:
+        import re
+
+        lower = command.lower()
+        return bool(re.search(r"(^|[\s;|&()])(?:sudo|su|doas)(\s|$)", lower))
 
     def __len__(self) -> int:
         return len(self._tools)

@@ -35,6 +35,8 @@ class ExecTool(Tool):
             r"\bdd\s+if=",                   # dd
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
+            r"\b(sudo|su|doas)\b",            # privilege escalation
+            r"\bsudo\b.*\bsh\b",            # sudo shell chains
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
         ]
         self.allow_patterns = allow_patterns or []
