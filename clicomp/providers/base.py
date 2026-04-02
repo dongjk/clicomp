@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
-import time
-import uuid
 
 
 @dataclass
@@ -222,19 +220,12 @@ class LLMProvider(ABC):
 
     async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
         """Call chat() and convert unexpected exceptions to error responses."""
-        request_id = uuid.uuid4().hex[:8]
-        started = time.perf_counter()
         try:
-            logger.debug("LLM chat start req={} model={} stream=False msgs={} tools={}", request_id, kwargs.get("model"), len(kwargs.get("messages") or []), len(kwargs.get("tools") or []))
-            resp = await self.chat(**kwargs)
-            logger.debug("LLM chat done req={} finish={} elapsed_ms={}", request_id, resp.finish_reason, int((time.perf_counter()-started)*1000))
-            return resp
+            return await self.chat(**kwargs)
         except asyncio.CancelledError:
-            logger.info("LLM chat cancelled req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
             raise
         except Exception as exc:
-            logger.exception("LLM chat exception req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
-            return LLMResponse(content=f"Error calling LLM: {type(exc).__name__}: {exc}", finish_reason="error")
+            return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
     async def chat_stream(
         self,
@@ -265,19 +256,12 @@ class LLMProvider(ABC):
 
     async def _safe_chat_stream(self, **kwargs: Any) -> LLMResponse:
         """Call chat_stream() and convert unexpected exceptions to error responses."""
-        request_id = uuid.uuid4().hex[:8]
-        started = time.perf_counter()
         try:
-            logger.debug("LLM stream start req={} model={} msgs={} tools={}", request_id, kwargs.get("model"), len(kwargs.get("messages") or []), len(kwargs.get("tools") or []))
-            resp = await self.chat_stream(**kwargs)
-            logger.debug("LLM stream done req={} finish={} elapsed_ms={}", request_id, resp.finish_reason, int((time.perf_counter()-started)*1000))
-            return resp
+            return await self.chat_stream(**kwargs)
         except asyncio.CancelledError:
-            logger.info("LLM stream cancelled req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
             raise
         except Exception as exc:
-            logger.exception("LLM stream exception req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
-            return LLMResponse(content=f"Error calling LLM: {type(exc).__name__}: {exc}", finish_reason="error")
+            return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
     async def chat_stream_with_retry(
         self,
