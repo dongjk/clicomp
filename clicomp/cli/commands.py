@@ -486,6 +486,7 @@ def agent(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
+    stream: bool = typer.Option(True, "--stream/--no-stream", help="Use streaming/SSE output in interactive mode"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show clicomp runtime logs during chat"),
 ):
     """Interact with the agent directly."""
@@ -671,12 +672,16 @@ def agent(
                         turn_response.clear()
                         renderer = StreamRenderer(render_markdown=markdown)
 
+                        metadata = {}
+                        if stream:
+                            metadata["_wants_stream"] = True
+
                         await bus.publish_inbound(InboundMessage(
                             channel=cli_channel,
                             sender_id="user",
                             chat_id=cli_chat_id,
                             content=user_input,
-                            metadata={"_wants_stream": True},
+                            metadata=metadata,
                         ))
 
                         await turn_done.wait()
