@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -175,28 +176,50 @@ class AzureOpenAIProvider(LLMProvider):
             LLMResponse with content and/or tool calls.
         """
         deployment_name = model or self.default_model
+        request_id = uuid.uuid4().hex[:8]
         url = self._build_chat_url(deployment_name)
         headers = self._build_headers()
         payload = self._prepare_request_payload(
             deployment_name, messages, tools, max_tokens, temperature, reasoning_effort,
             tool_choice=tool_choice,
         )
+        started = time.perf_counter()
+        timeout = httpx.Timeout(connect=10.0, read=3600.0, write=60.0, pool=10.0)
 
         try:
-            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
+            logger.debug("Azure chat start req={} model={} stream=False msgs={} tools={}", request_id, deployment_name, len(messages), len(tools or []))
+            async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 if response.status_code != 200:
+                    logger.warning("Azure chat non-200 req={} status={} elapsed_ms={}", request_id, response.status_code, int((time.perf_counter()-started)*1000))
                     return LLMResponse(
                         content=f"Azure OpenAI API Error {response.status_code}: {response.text}",
                         finish_reason="error",
                     )
                 
                 response_data = response.json()
+                logger.debug("Azure chat done req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
                 return self._parse_response(response_data)
 
+        except asyncio.CancelledError:
+            logger.info("Azure chat cancelled req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            raise
+        except httpx.RemoteProtocolError as e:
+            logger.exception("Azure chat remote protocol error req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
+        except httpx.ReadTimeout as e:
+            logger.exception("Azure chat read timeout req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
+        except httpx.ConnectTimeout as e:
+            logger.exception("Azure chat connect timeout req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
+        except httpx.ConnectError as e:
+            logger.exception("Azure chat connect error req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
         except Exception as e:
+            logger.exception("Azure chat exception req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
             return LLMResponse(
-                content=f"Error calling Azure OpenAI: {repr(e)}",
+                content=f"Error calling Azure OpenAI: {type(e).__name__}: {e}",
                 finish_reason="error",
             )
 
@@ -260,6 +283,7 @@ class AzureOpenAIProvider(LLMProvider):
     ) -> LLMResponse:
         """Stream a chat completion via Azure OpenAI SSE."""
         deployment_name = model or self.default_model
+        request_id = uuid.uuid4().hex[:8]
         url = self._build_chat_url(deployment_name)
         headers = self._build_headers()
         payload = self._prepare_request_payload(
@@ -267,19 +291,41 @@ class AzureOpenAIProvider(LLMProvider):
             reasoning_effort, tool_choice=tool_choice,
         )
         payload["stream"] = True
+        started = time.perf_counter()
+        timeout = httpx.Timeout(connect=10.0, read=3600.0, write=60.0, pool=10.0)
 
         try:
-            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
+            logger.debug("Azure stream start req={} model={} msgs={} tools={}", request_id, deployment_name, len(messages), len(tools or []))
+            async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     if response.status_code != 200:
                         text = await response.aread()
+                        logger.warning("Azure stream non-200 req={} status={} elapsed_ms={}", request_id, response.status_code, int((time.perf_counter()-started)*1000))
                         return LLMResponse(
                             content=f"Azure OpenAI API Error {response.status_code}: {text.decode('utf-8', 'ignore')}",
                             finish_reason="error",
                         )
-                    return await self._consume_stream(response, on_content_delta)
+                    resp = await self._consume_stream(response, on_content_delta)
+                    logger.debug("Azure stream done req={} finish={} elapsed_ms={}", request_id, resp.finish_reason, int((time.perf_counter()-started)*1000))
+                    return resp
+        except asyncio.CancelledError:
+            logger.info("Azure stream cancelled req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            raise
+        except httpx.RemoteProtocolError as e:
+            logger.exception("Azure stream remote protocol error req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
+        except httpx.ReadTimeout as e:
+            logger.exception("Azure stream read timeout req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
+        except httpx.ConnectTimeout as e:
+            logger.exception("Azure stream connect timeout req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
+        except httpx.ConnectError as e:
+            logger.exception("Azure stream connect error req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Transient Azure transport error: {type(e).__name__}: {e}", finish_reason="error")
         except Exception as e:
-            return LLMResponse(content=f"Error calling Azure OpenAI: {repr(e)}", finish_reason="error")
+            logger.exception("Azure stream exception req={} elapsed_ms={}", request_id, int((time.perf_counter()-started)*1000))
+            return LLMResponse(content=f"Error calling Azure OpenAI: {type(e).__name__}: {e}", finish_reason="error")
 
     async def _consume_stream(
         self,

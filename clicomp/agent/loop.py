@@ -236,6 +236,7 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+            iter_started = time.perf_counter()
             logger.info("Agent loop iteration {} started (session={}, channel={}, chat_id={})", iteration, message_id or "-", channel, chat_id)
 
             tool_defs = self.tools.get_definitions()
@@ -262,8 +263,8 @@ class AgentLoop:
                 "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
             }
             logger.info(
-                "Agent loop iteration {} provider returned: finish_reason={}, tool_calls={}, content_len={}",
-                iteration, response.finish_reason, len(response.tool_calls), len(response.content or ""),
+                "Agent loop iteration {} provider returned: finish_reason={}, tool_calls={}, content_len={}, elapsed_ms={}",
+                iteration, response.finish_reason, len(response.tool_calls), len(response.content or ""), int((time.perf_counter()-iter_started)*1000),
             )
 
             if response.has_tool_calls:
@@ -304,10 +305,12 @@ class AgentLoop:
                 # return_exceptions=True ensures all results are collected
                 # even if one tool is cancelled or raises BaseException.
                 logger.info("Agent loop iteration {} executing {} tool call(s)", iteration, len(response.tool_calls))
+                tool_started = time.perf_counter()
                 results = await asyncio.gather(*(
                     self.tools.execute(tc.name, tc.arguments)
                     for tc in response.tool_calls
                 ), return_exceptions=True)
+                logger.info("Agent loop iteration {} tool execution done elapsed_ms={}", iteration, int((time.perf_counter()-tool_started)*1000))
 
                 for tool_call, result in zip(response.tool_calls, results):
                     if isinstance(result, BaseException):
@@ -336,7 +339,7 @@ class AgentLoop:
                 break
 
         if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
+            logger.warning("Max iterations ({}) reached elapsed_ms={}", self.max_iterations, int((time.perf_counter()-self._start_time)*1000))
             final_content = (
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
@@ -407,7 +410,7 @@ class AgentLoop:
                         content="", metadata=msg.metadata or {},
                     ))
             except asyncio.CancelledError:
-                logger.info("Task cancelled for session {}", msg.session_key)
+                logger.info("Task cancelled for session {} message_id={}", msg.session_key, msg.metadata.get("message_id"))
                 raise
             except Exception:
                 logger.exception("Error processing message for session {}", msg.session_key)
