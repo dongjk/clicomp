@@ -486,7 +486,7 @@ def agent(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
-    stream: bool = typer.Option(True, "--stream/--no-stream", help="Use streaming/SSE output in interactive mode"),
+    stream: bool = typer.Option(True, "--stream/--no-stream", help="Use streaming/SSE output for agent responses"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show clicomp runtime logs during chat"),
 ):
     """Interact with the agent directly."""
@@ -546,15 +546,22 @@ def agent(
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
-            renderer = StreamRenderer(render_markdown=markdown)
+            renderer = StreamRenderer(render_markdown=markdown) if stream else None
             response = await agent_loop.process_direct(
                 message, session_id,
                 on_progress=_cli_progress,
-                on_stream=renderer.on_delta,
-                on_stream_end=renderer.on_end,
+                on_stream=renderer.on_delta if renderer else None,
+                on_stream_end=renderer.on_end if renderer else None,
             )
-            if not renderer.streamed:
-                await renderer.close()
+            if renderer:
+                if not renderer.streamed:
+                    await renderer.close()
+                    _print_agent_response(
+                        response.content if response else "",
+                        render_markdown=markdown,
+                        metadata=response.metadata if response else None,
+                    )
+            else:
                 _print_agent_response(
                     response.content if response else "",
                     render_markdown=markdown,
