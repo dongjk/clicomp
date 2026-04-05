@@ -133,6 +133,11 @@ def _render_interactive_ansi(render_fn) -> str:
     return capture.get()
 
 
+def _session_label(metadata: dict | None = None) -> str | None:
+    meta = metadata or {}
+    return meta.get("_session") or meta.get("session") or meta.get("session_id")
+
+
 def _print_agent_response(
     response: str,
     render_markdown: bool,
@@ -142,8 +147,10 @@ def _print_agent_response(
     console = _make_console()
     content = response or ""
     body = _response_renderable(content, render_markdown, metadata)
+    session = _session_label(metadata)
+    header = f"[cyan]{__logo__} clicomp[/cyan] [dim][{session}][/dim]" if session else f"[cyan]{__logo__} clicomp[/cyan]"
     console.print()
-    console.print(f"[cyan]{__logo__} clicomp[/cyan]")
+    console.print(header)
     console.print(body)
     console.print()
 
@@ -157,11 +164,13 @@ def _response_renderable(content: str, render_markdown: bool, metadata: dict | N
     return Markdown(content)
 
 
-async def _print_interactive_line(text: str) -> None:
+async def _print_interactive_line(text: str, metadata: dict | None = None) -> None:
     """Print async interactive updates with prompt_toolkit-safe Rich styling."""
     def _write() -> None:
+        session = _session_label(metadata)
+        prefix = f"[dim][{session}][/dim] " if session else ""
         ansi = _render_interactive_ansi(
-            lambda c: c.print(f"  [dim]↳ {text}[/dim]")
+            lambda c: c.print(f"{prefix}{text}")
         )
         print_formatted_text(ANSI(ansi), end="")
 
@@ -189,16 +198,18 @@ async def _print_interactive_response(
     await run_in_terminal(_write)
 
 
-def _print_cli_progress_line(text: str, thinking: ThinkingSpinner | None) -> None:
+def _print_cli_progress_line(text: str, thinking: ThinkingSpinner | None, metadata: dict | None = None) -> None:
     """Print a CLI progress line, pausing the spinner if needed."""
     with thinking.pause() if thinking else nullcontext():
-        console.print(f"  [dim]↳ {text}[/dim]")
+        session = _session_label(metadata)
+        prefix = f"[{session}] " if session else ""
+        console.print(f"{prefix}{text}")
 
 
-async def _print_interactive_progress_line(text: str, thinking: ThinkingSpinner | None) -> None:
+async def _print_interactive_progress_line(text: str, thinking: ThinkingSpinner | None, metadata: dict | None = None) -> None:
     """Print an interactive progress line, pausing the spinner if needed."""
     with thinking.pause() if thinking else nullcontext():
-        await _print_interactive_line(text)
+        await _print_interactive_line(text, metadata)
 
 
 def _is_exit_command(command: str) -> bool:
@@ -541,7 +552,7 @@ def agent(
             return
         if ch and not tool_hint and not ch.send_progress:
             return
-        _print_cli_progress_line(content, _thinking)
+        _print_cli_progress_line(content, _thinking, {"_session": session_id})
 
     if message:
         # Single message mode — direct call, no bus needed
@@ -553,6 +564,8 @@ def agent(
                 on_stream=renderer.on_delta if renderer else None,
                 on_stream_end=renderer.on_end if renderer else None,
             )
+            if response and response.metadata is not None:
+                response.metadata.setdefault("_session", session_id)
             if renderer:
                 if not renderer.streamed:
                     await renderer.close()
@@ -631,7 +644,9 @@ def agent(
                             elif ch and not is_tool_hint and not ch.send_progress:
                                 pass
                             else:
-                                await _print_interactive_progress_line(msg.content, _thinking)
+                                meta = dict(msg.metadata or {})
+                                meta.setdefault("_session", session_id)
+                                await _print_interactive_progress_line(msg.content, _thinking, meta)
                             continue
 
                         if msg.metadata.get("_error"):
