@@ -558,12 +558,17 @@ def agent(
         # Single message mode — direct call, no bus needed
         async def run_once():
             renderer = StreamRenderer(render_markdown=markdown) if stream else None
+            local_thinking = ThinkingSpinner() if not stream else None
+            if local_thinking:
+                local_thinking.__enter__()
             response = await agent_loop.process_direct(
                 message, session_id,
                 on_progress=_cli_progress,
                 on_stream=renderer.on_delta if renderer else None,
                 on_stream_end=renderer.on_end if renderer else None,
             )
+            if local_thinking:
+                local_thinking.__exit__(None, None, None)
             if response and response.metadata is not None:
                 response.metadata.setdefault("_session", session_id)
             if renderer:
