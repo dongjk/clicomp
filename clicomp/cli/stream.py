@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import time
+from contextlib import contextmanager
 
 from rich.console import Console
 from rich.live import Live
@@ -25,33 +26,46 @@ class ThinkingSpinner:
     """Spinner that shows 'clicomp is thinking...' with pause support."""
 
     def __init__(self, console: Console | None = None):
-        c = console or _make_console()
-        self._spinner = c.status("[dim]clicomp is thinking...[/dim]", spinner="dots")
+        self._console = console or _make_console()
+        self._spinner = self._console.status("[dim]clicomp is thinking...[/dim]", spinner="dots")
         self._active = False
+        self._visible = False
 
     def __enter__(self):
         self._spinner.start()
         self._active = True
+        self._visible = True
         return self
 
     def __exit__(self, *exc):
-        self._active = False
-        self._spinner.stop()
+        self.stop(clear=True)
         return False
 
+    def stop(self, *, clear: bool = False) -> None:
+        if self._spinner and self._visible:
+            self._spinner.stop()
+            self._visible = False
+            if clear:
+                self._console.print(end="\r")
+                self._console.file.write("\033[2K")
+                self._console.file.flush()
+        self._active = False
+
     def pause(self):
-        """Context manager: temporarily stop spinner for clean output."""
-        from contextlib import contextmanager
+        """Context manager: temporarily hide spinner for clean output."""
 
         @contextmanager
         def _ctx():
-            if self._spinner and self._active:
-                self._spinner.stop()
+            was_active = self._active and self._visible
+            if was_active:
+                self.stop(clear=True)
             try:
                 yield
             finally:
-                if self._spinner and self._active:
+                if was_active:
                     self._spinner.start()
+                    self._visible = True
+                    self._active = True
 
         return _ctx()
 
