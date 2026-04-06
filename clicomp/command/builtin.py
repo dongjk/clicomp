@@ -97,14 +97,12 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     loop = ctx.loop
     session = ctx.session or loop.sessions.get_or_create(ctx.key)
     snapshot = session.messages[session.last_consolidated:]
-    session.clear()
-    loop.sessions.save(session)
-    loop.sessions.invalidate(session.key)
+    had_history = loop.sessions.archive_and_reset(session.key)
     if snapshot:
         loop._schedule_background(loop.memory_consolidator.archive_messages(snapshot))
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-        content="New session started.",
+        content="New session started. Previous session archived." if had_history else "New session started.",
     )
 
 

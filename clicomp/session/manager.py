@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
@@ -136,6 +137,8 @@ class SessionManager:
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
+        self.archive_dir = ensure_dir(self.sessions_dir / "archive")
+        self.legacy_archive_dir = ensure_dir(self.legacy_sessions_dir / "archive")
         self._cache: dict[str, Session] = {}
 
     def _get_session_path(self, key: str) -> Path:
@@ -218,21 +221,47 @@ class SessionManager:
     def save(self, session: Session) -> None:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
+        legacy_path = self._get_legacy_session_path(session.key)
 
-        with open(path, "w", encoding="utf-8") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        metadata_line = {
+            "_type": "metadata",
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "last_consolidated": session.last_consolidated
+        }
+
+        for target in (path, legacy_path):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+                for msg in session.messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
         self._cache[session.key] = session
+
+    def archive_and_reset(self, key: str) -> bool:
+        """Archive the current session JSONL and reset the active file in both locations."""
+        session = self.get_or_create(key)
+        primary = self._get_session_path(key)
+        legacy = self._get_legacy_session_path(key)
+
+        had_history = bool(session.messages) or primary.exists() or legacy.exists()
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        suffix = uuid4().hex[:8]
+        safe_key = safe_filename(key.replace(":", "_"))
+        archive_name = f"{safe_key}.{ts}.{suffix}.jsonl"
+
+        for source, archive_root in ((primary, self.archive_dir), (legacy, self.legacy_archive_dir)):
+            if source.exists():
+                archive_root.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(source), str(archive_root / archive_name))
+
+        session.clear()
+        self.save(session)
+        self.invalidate(key)
+        return had_history
 
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
