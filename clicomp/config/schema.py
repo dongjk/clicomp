@@ -42,6 +42,8 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 40
     reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
+    llm_timeout: int = 1800  # seconds; default 30 minutes for large prompts / long generations
+    llm_retry_delays: list[int] = Field(default_factory=list)  # empty = no retry
 
 
 class AgentsConfig(Base):

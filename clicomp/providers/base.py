@@ -68,6 +68,8 @@ class GenerationSettings:
     temperature: float = 0.7
     max_tokens: int = 4096
     reasoning_effort: str | None = None
+    timeout: int = 1800
+    retry_delays: tuple[int, ...] = ()
 
 
 class LLMProvider(ABC):
@@ -78,7 +80,6 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
-    _CHAT_RETRY_DELAYS = (1, 2, 4)
     _TRANSIENT_ERROR_MARKERS = (
         "429",
         "rate limit",
@@ -289,7 +290,10 @@ class LLMProvider(ABC):
             on_content_delta=on_content_delta,
         )
 
-        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+        retry_delays = tuple(self.generation.retry_delays or ())
+        attempts = len(retry_delays) + 1
+
+        for attempt in range(1, attempts + 1):
             response = await self._safe_chat_stream(**kw)
 
             if response.finish_reason != "error":
@@ -302,9 +306,13 @@ class LLMProvider(ABC):
                     return await self._safe_chat_stream(**{**kw, "messages": stripped})
                 return response
 
+            if attempt >= attempts:
+                return response
+
+            delay = retry_delays[attempt - 1]
             logger.warning(
                 "LLM transient error (attempt {}/{}), retrying in {}s: {}",
-                attempt, len(self._CHAT_RETRY_DELAYS), delay,
+                attempt, len(retry_delays), delay,
                 (response.content or "")[:120].lower(),
             )
             await asyncio.sleep(delay)
@@ -340,7 +348,10 @@ class LLMProvider(ABC):
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
         )
 
-        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+        retry_delays = tuple(self.generation.retry_delays or ())
+        attempts = len(retry_delays) + 1
+
+        for attempt in range(1, attempts + 1):
             response = await self._safe_chat(**kw)
 
             if response.finish_reason != "error":
@@ -353,9 +364,13 @@ class LLMProvider(ABC):
                     return await self._safe_chat(**{**kw, "messages": stripped})
                 return response
 
+            if attempt >= attempts:
+                return response
+
+            delay = retry_delays[attempt - 1]
             logger.warning(
                 "LLM transient error (attempt {}/{}), retrying in {}s: {}",
-                attempt, len(self._CHAT_RETRY_DELAYS), delay,
+                attempt, len(retry_delays), delay,
                 (response.content or "")[:120].lower(),
             )
             await asyncio.sleep(delay)

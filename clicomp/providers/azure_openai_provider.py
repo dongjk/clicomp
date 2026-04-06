@@ -36,6 +36,7 @@ class AzureOpenAIProvider(LLMProvider):
         default_model: str = "gpt-5.2-chat",
         use_managed_identity: bool = False,
         managed_identity_client_id: str | None = None,
+        timeout: float = 1800.0,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
@@ -45,6 +46,7 @@ class AzureOpenAIProvider(LLMProvider):
         self._aad_token_cache: str | None = None
         self._aad_token_expires_at: float = 0
         self._credential: Any | None = None
+        self.timeout = timeout
 
         # Validate required parameters
         if not api_base:
@@ -183,7 +185,7 @@ class AzureOpenAIProvider(LLMProvider):
         )
 
         try:
-            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, verify=True) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 if response.status_code != 200:
                     return LLMResponse(
@@ -269,7 +271,7 @@ class AzureOpenAIProvider(LLMProvider):
         payload["stream"] = True
 
         try:
-            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, verify=True) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     if response.status_code != 200:
                         text = await response.aread()

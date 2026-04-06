@@ -408,6 +408,7 @@ def _make_provider(config: Config):
             default_model=model,
             use_managed_identity=p.use_managed_identity if p else False,
             managed_identity_client_id=p.managed_identity_client_id if p else None,
+            timeout=float(config.agents.defaults.llm_timeout),
         )
     elif backend == "anthropic":
         from clicomp.providers.anthropic_provider import AnthropicProvider
@@ -432,6 +433,8 @@ def _make_provider(config: Config):
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,
         reasoning_effort=defaults.reasoning_effort,
+        timeout=defaults.llm_timeout,
+        retry_delays=tuple(defaults.llm_retry_delays),
     )
     return provider
 
