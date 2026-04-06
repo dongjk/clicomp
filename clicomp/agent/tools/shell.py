@@ -17,7 +17,7 @@ class ExecTool(Tool):
 
     def __init__(
         self,
-        timeout: int = 60,
+        timeout: int = 1800,
         working_dir: str | None = None,
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
@@ -47,7 +47,7 @@ class ExecTool(Tool):
     def name(self) -> str:
         return "exec"
 
-    _MAX_TIMEOUT = 600
+    _MAX_TIMEOUT = 1800
     _MAX_OUTPUT = 10_000
 
     @property
@@ -71,10 +71,10 @@ class ExecTool(Tool):
                     "type": "integer",
                     "description": (
                         "Timeout in seconds. Increase for long-running commands "
-                        "like compilation or installation (default 60, max 600)."
+                        "like compilation or installation (default 1800, max 1800)."
                     ),
                     "minimum": 1,
-                    "maximum": 600,
+                    "maximum": 1800,
                 },
             },
             "required": ["command"],

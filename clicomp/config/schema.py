@@ -130,7 +130,7 @@ class ExecToolConfig(Base):
     """Shell exec tool configuration."""
 
     enable: bool = True
-    timeout: int = 60
+    timeout: int = 1800
     path_append: str = ""
 
 class MCPServerConfig(Base):
