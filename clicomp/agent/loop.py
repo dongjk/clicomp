@@ -55,7 +55,7 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
-        max_iterations: int = 40,
+        max_iterations: int = 100,
         context_window_tokens: int = 65_536,
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
