@@ -287,7 +287,14 @@ class AzureOpenAIProvider(LLMProvider):
         stream: bool = False,
         previous_response_id: str | None = None,
     ) -> dict[str, Any]:
-        instructions, input_items = self._prepare_responses_input(messages)
+        effective_messages = messages
+        if previous_response_id and messages:
+            current = messages[-1]
+            current_role = current.get("role")
+            current_content = current.get("content")
+            if current_role in {"user", "assistant", "tool"}:
+                effective_messages = [current]
+        instructions, input_items = self._prepare_responses_input(effective_messages)
         payload: dict[str, Any] = {
             "model": deployment_name,
             "input": input_items,
@@ -405,6 +412,11 @@ class AzureOpenAIProvider(LLMProvider):
         deployment_name = model or self.default_model
         url = self._build_responses_url()
         headers = self._build_headers()
+        previous_response_id = None
+        if messages:
+            meta = messages[-1].get("_meta") if isinstance(messages[-1], dict) else None
+            if isinstance(meta, dict):
+                previous_response_id = meta.get("azure_previous_response_id")
         payload = self._prepare_request_payload(
             deployment_name,
             messages,
@@ -413,6 +425,7 @@ class AzureOpenAIProvider(LLMProvider):
             temperature,
             reasoning_effort,
             tool_choice=tool_choice,
+            previous_response_id=previous_response_id,
         )
 
         try:
@@ -444,6 +457,11 @@ class AzureOpenAIProvider(LLMProvider):
         deployment_name = model or self.default_model
         url = self._build_responses_url()
         headers = self._build_headers()
+        previous_response_id = None
+        if messages:
+            meta = messages[-1].get("_meta") if isinstance(messages[-1], dict) else None
+            if isinstance(meta, dict):
+                previous_response_id = meta.get("azure_previous_response_id")
         payload = self._prepare_request_payload(
             deployment_name,
             messages,
@@ -453,6 +471,7 @@ class AzureOpenAIProvider(LLMProvider):
             reasoning_effort,
             tool_choice=tool_choice,
             stream=True,
+            previous_response_id=previous_response_id,
         )
 
         try:
