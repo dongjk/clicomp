@@ -488,64 +488,10 @@ def _migrate_cron_store(config: "Config") -> None:
         shutil.move(str(legacy_path), str(new_path))
 
 
-def _migrate_repo_root_config() -> None:
-    """One-time migration: move legacy repo-root config.json into .clicomp/config.json."""
-    root_config = Path.cwd() / "config.json"
-    instance_config = Path.cwd() / ".clicomp" / "config.json"
-    if not root_config.is_file() or instance_config.exists():
-        return
-    instance_config.parent.mkdir(parents=True, exist_ok=True)
-    import shutil
-    shutil.move(str(root_config), str(instance_config))
-
-
-
-def _migrate_repo_local_sessions(config: "Config") -> None:
-    """One-time migration: move repo-local .clicomp/sessions into workspace/sessions."""
-    legacy_dir = Path.cwd() / ".clicomp" / "sessions"
-    target_dir = config.workspace_path / "sessions"
-    if not legacy_dir.is_dir():
-        return
-
-    import shutil
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    for source in legacy_dir.glob("*.jsonl"):
-        target = target_dir / source.name
-        if target.exists():
-            continue
-        shutil.move(str(source), str(target))
-
-    # Normalize accidentally de-prefixed CLI session files from older builds,
-    # e.g. create-skill.jsonl -> cli_create-skill.jsonl. If both exist, merge the
-    # bare session into the normalized one and remove the duplicate.
-    for source in list(target_dir.glob("*.jsonl")):
-        if source.name.startswith(("cli_", "archive")):
-            continue
-        normalized = target_dir / f"cli_{source.name}"
-        if normalized.exists():
-            try:
-                with open(source, encoding="utf-8") as sf:
-                    source_lines = [line for line in sf if line.strip()]
-                with open(normalized, encoding="utf-8") as nf:
-                    normalized_lines = [line for line in nf if line.strip()]
-                source_msgs = source_lines[1:]
-                normalized_msgs = normalized_lines[1:]
-                existing = set(normalized_msgs)
-                merged_msgs = normalized_msgs + [line for line in source_msgs if line not in existing]
-                if normalized_lines:
-                    metadata = json.loads(normalized_lines[0])
-                    metadata["updated_at"] = datetime.now().isoformat()
-                    metadata["key"] = f"cli:{source.stem}"
-                    with open(normalized, "w", encoding="utf-8") as out:
-                        out.write(json.dumps(metadata, ensure_ascii=False) + "\n")
-                        for line in merged_msgs:
-                            out.write(line if line.endswith("\n") else line + "\n")
-                source.unlink(missing_ok=True)
-            except Exception:
-                continue
-        else:
-            shutil.move(str(source), str(normalized))
+def _normalize_cli_session_key(session_id: str) -> str:
+    """Normalize CLI session ids so all entry paths share the same session key."""
+    text = (session_id or "").strip() or "direct"
+    return text if ":" in text else f"cli:{text}"
 
 
 # ============================================================================
@@ -570,10 +516,8 @@ def agent(
     from clicomp.bus.queue import MessageBus
     from clicomp.cron.service import CronService
 
-    _migrate_repo_root_config()
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
-    _migrate_repo_local_sessions(config)
 
     bus = MessageBus()
     provider = _make_provider(config)
@@ -617,22 +561,21 @@ def agent(
             return
         if ch and not tool_hint and not ch.send_progress:
             return
-        _print_cli_progress_line(content, _thinking, {"_session": session_id})
+        _print_cli_progress_line(content, _thinking, {"_session": normalized_session_id})
+
+    normalized_session_id = _normalize_cli_session_key(session_id)
 
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
             renderer = StreamRenderer(render_markdown=markdown) if stream else None
             local_thinking = ThinkingSpinner() if not stream else None
-            if ":" in session_id:
-                direct_channel, direct_chat_id = session_id.split(":", 1)
-            else:
-                direct_channel, direct_chat_id = "cli", session_id
+            direct_channel, direct_chat_id = normalized_session_id.split(":", 1)
             if local_thinking:
                 local_thinking.__enter__()
             response = await agent_loop.process_direct(
                 message,
-                session_id,
+                normalized_session_id,
                 channel=direct_channel,
                 chat_id=direct_chat_id,
                 on_progress=_cli_progress,
@@ -642,7 +585,7 @@ def agent(
             if local_thinking:
                 local_thinking.__exit__(None, None, None)
             if response and response.metadata is not None:
-                response.metadata.setdefault("_session", session_id)
+                response.metadata.setdefault("_session", normalized_session_id)
             if renderer:
                 if not renderer.streamed:
                     await renderer.close()
@@ -666,10 +609,7 @@ def agent(
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
 
-        if ":" in session_id:
-            cli_channel, cli_chat_id = session_id.split(":", 1)
-        else:
-            cli_channel, cli_chat_id = "cli", session_id
+        cli_channel, cli_chat_id = normalized_session_id.split(":", 1)
 
         def _handle_signal(signum, frame):
             sig_name = signal.Signals(signum).name
