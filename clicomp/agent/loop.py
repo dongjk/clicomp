@@ -290,10 +290,13 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
 
+                normalized_tool_names: list[str] = []
                 for tc in response.tool_calls:
-                    tools_used.append(tc.name)
+                    tool_name = (tc.name or "").strip() or "(missing tool name)"
+                    normalized_tool_names.append(tool_name)
+                    tools_used.append(tool_name)
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tc.name, args_str[:200])
+                    logger.info("Tool call: {}({})", tool_name, args_str[:200])
 
                 # Re-bind tool context right before execution so that
                 # concurrent sessions don't clobber each other's routing.
@@ -305,18 +308,18 @@ class AgentLoop:
                 # even if one tool is cancelled or raises BaseException.
                 logger.info("Agent loop iteration {} executing {} tool call(s)", iteration, len(response.tool_calls))
                 results = await asyncio.gather(*(
-                    self.tools.execute(tc.name, tc.arguments)
-                    for tc in response.tool_calls
+                    self.tools.execute(tool_name, tc.arguments)
+                    for tc, tool_name in zip(response.tool_calls, normalized_tool_names)
                 ), return_exceptions=True)
 
-                for tool_call, result in zip(response.tool_calls, results):
+                for tool_call, tool_name, result in zip(response.tool_calls, normalized_tool_names, results):
                     if isinstance(result, BaseException):
-                        logger.warning("Agent loop iteration {} tool {} raised {}", iteration, tool_call.name, type(result).__name__)
+                        logger.warning("Agent loop iteration {} tool {} raised {}", iteration, tool_name, type(result).__name__)
                         result = f"Error: {type(result).__name__}: {result}"
                     else:
-                        logger.info("Agent loop iteration {} tool {} completed", iteration, tool_call.name)
+                        logger.info("Agent loop iteration {} tool {} completed", iteration, tool_name)
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tool_call.id, tool_name, result
                     )
             else:
                 if on_stream and on_stream_end:
