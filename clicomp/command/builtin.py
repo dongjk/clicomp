@@ -15,11 +15,11 @@ from clicomp.providers.base import GenerationSettings
 from clicomp.utils.helpers import build_status_content
 
 
-_HISTORY_ROLE_EMOJI = {
-    "user": "👤",
-    "assistant": "🤖",
-    "tool": "🛠️",
-    "system": "⚙️",
+_HISTORY_ROLE_LABEL = {
+    "user": "[U]",
+    "assistant": "[A]",
+    "tool": "[T]",
+    "system": "[S]",
 }
 
 
@@ -55,7 +55,7 @@ def _stringify_history_content(content: Any) -> str:
 def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
     """Render one compact one-line preview for /history."""
     role = str(message.get("role") or "assistant")
-    emoji = _HISTORY_ROLE_EMOJI.get(role, "💬")
+    label = _HISTORY_ROLE_LABEL.get(role, "[?]")
 
     content = _stringify_history_content(message.get("content"))
     if not content and message.get("tool_calls"):
@@ -74,7 +74,7 @@ def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
         content = content[: max_chars - 3].rstrip() + "..."
     if not content:
         content = "(empty)"
-    return f"{emoji} {content}"
+    return f"{label} {content}"
 
 
 def _available_models(loop) -> list[str]:
