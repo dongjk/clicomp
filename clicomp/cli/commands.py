@@ -36,6 +36,7 @@ from clicomp import __logo__, __version__
 from clicomp.cli.stream import StreamRenderer, ThinkingSpinner
 from clicomp.config.paths import get_workspace_path, is_default_workspace
 from clicomp.config.schema import Config
+from clicomp.providers.base import GenerationSettings
 from clicomp.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
