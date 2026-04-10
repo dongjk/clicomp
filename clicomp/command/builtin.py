@@ -57,17 +57,18 @@ def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
     role = str(message.get("role") or "assistant")
     label = _HISTORY_ROLE_LABEL.get(role, "[?]")
 
+    tool_names: list[str] = []
+    for tc in message.get("tool_calls") or []:
+        if isinstance(tc, dict):
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name")
+            if name:
+                tool_names.append(str(name))
+
     content = _stringify_history_content(message.get("content"))
-    if not content and message.get("tool_calls"):
-        tool_names = []
-        for tc in message.get("tool_calls") or []:
-            if isinstance(tc, dict):
-                fn = tc.get("function") or {}
-                name = fn.get("name") or tc.get("name")
-                if name:
-                    tool_names.append(str(name))
-        if tool_names:
-            content = f"[tool calls] {', '.join(tool_names)}"
+    if role == "assistant" and tool_names:
+        prefix = f"[tool calls] {', '.join(tool_names)}"
+        content = f"{prefix} — {content}" if content else prefix
 
     content = " ".join(content.split())
     if len(content) > max_chars:
