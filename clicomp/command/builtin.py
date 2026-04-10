@@ -124,6 +124,19 @@ def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
     return f"{label} {content}{suffix}"
 
 
+def _parse_history_line_no(spec: str) -> tuple[int | None, str | None]:
+    """Parse a single 1-based history line number."""
+    text = (spec or "").strip()
+    if not text:
+        return None, "Usage: /show <history line number>"
+    if not text.isdigit():
+        return None, f"Invalid line number: {spec}"
+    line_no = int(text)
+    if line_no <= 0:
+        return None, f"Line number must be >= 1: {spec}"
+    return line_no, None
+
+
 def _available_models(loop) -> list[str]:
     """Return configured model candidates for interactive model switching."""
     models: list[str] = []
@@ -386,6 +399,50 @@ async def cmd_history(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_show(ctx: CommandContext) -> OutboundMessage:
+    """Show one full message from the current session history."""
+    loop = ctx.loop
+    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    history = session.get_history(max_messages=0)
+    line_no, error = _parse_history_line_no(ctx.args)
+    if error:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=error,
+            metadata={"render_as": "text"},
+        )
+
+    if not history:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="No message history yet.",
+            metadata={"render_as": "text"},
+        )
+
+    assert line_no is not None
+    if line_no > len(history):
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=f"Line number out of range (1-{len(history)}): {line_no}",
+            metadata={"render_as": "text"},
+        )
+
+    message = history[line_no - 1]
+    role = str(message.get("role") or "assistant")
+    label = _HISTORY_ROLE_LABEL.get(role, "[?]")
+    content = _stringify_history_content(message.get("content")) or "(empty)"
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=f"{line_no}. {label}\n{content}",
+        metadata={"render_as": "text"},
+    )
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     lines = [
@@ -399,6 +456,7 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/think — Show current reasoning level",
         "/think <none|low|medium|high> — Set reasoning level",
         "/history — Show current session message history",
+        "/show <n> — Show the full content of one history message",
         "/del 1-3,7,10-12 — Delete selected history lines from current session",
         "/help — Show available commands",
     ]
@@ -419,6 +477,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
     router.exact("/history", cmd_history)
+    router.prefix("/show ", cmd_show)
     router.prefix("/del ", cmd_del)
     router.exact("/model", cmd_model)
     router.prefix("/model ", cmd_model)
