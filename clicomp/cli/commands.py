@@ -488,6 +488,18 @@ def _migrate_cron_store(config: "Config") -> None:
         shutil.move(str(legacy_path), str(new_path))
 
 
+def _migrate_repo_root_config() -> None:
+    """One-time migration: move legacy repo-root config.json into .clicomp/config.json."""
+    root_config = Path.cwd() / "config.json"
+    instance_config = Path.cwd() / ".clicomp" / "config.json"
+    if not root_config.is_file() or instance_config.exists():
+        return
+    instance_config.parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.move(str(root_config), str(instance_config))
+
+
+
 def _migrate_repo_local_sessions(config: "Config") -> None:
     """One-time migration: move repo-local .clicomp/sessions into workspace/sessions."""
     legacy_dir = Path.cwd() / ".clicomp" / "sessions"
@@ -558,6 +570,7 @@ def agent(
     from clicomp.bus.queue import MessageBus
     from clicomp.cron.service import CronService
 
+    _migrate_repo_root_config()
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
     _migrate_repo_local_sessions(config)
