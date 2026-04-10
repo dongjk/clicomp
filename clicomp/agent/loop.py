@@ -266,6 +266,11 @@ class AgentLoop:
                 iteration, response.finish_reason, len(response.tool_calls), len(response.content or ""),
             )
 
+            provider_meta: dict[str, Any] = {}
+            provider_response_id = getattr(response, "provider_response_id", None)
+            if provider_response_id:
+                provider_meta["azure_response_id"] = provider_response_id
+
             if response.has_tool_calls:
                 if on_stream and on_stream_end:
                     await on_stream_end(resuming=True)
@@ -289,6 +294,8 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
+                if provider_meta:
+                    messages[-1].setdefault("_meta", {}).update(provider_meta)
 
                 normalized_tool_names: list[str] = []
                 for tc in response.tool_calls:
@@ -335,6 +342,8 @@ class AgentLoop:
                     messages, clean, reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
+                if provider_meta:
+                    messages[-1].setdefault("_meta", {}).update(provider_meta)
                 final_content = clean
                 break
 
@@ -504,6 +513,11 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
++
++        if self.provider.__class__.__name__ == "AzureOpenAIProvider":
++            previous_response_id = session.metadata.get("azure_previous_response_id")
++            if previous_response_id:
++                initial_messages[-1].setdefault("_meta", {})["azure_previous_response_id"] = previous_response_id
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -526,6 +540,9 @@ class AgentLoop:
             final_content = "I've completed processing but have no response to give."
 
         self._save_turn(session, all_msgs, 1 + len(history))
+        azure_response_id = next((m.get("_meta", {}).get("azure_response_id") for m in reversed(all_msgs) if isinstance(m, dict)), None)
+        if azure_response_id:
+            session.metadata["azure_previous_response_id"] = azure_response_id
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 

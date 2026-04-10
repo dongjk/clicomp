@@ -12,6 +12,8 @@ from urllib.parse import urljoin
 import httpx
 import json_repair
 
+from loguru import logger
+
 from clicomp.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from clicomp.utils.helpers import estimate_prompt_tokens
 
@@ -173,6 +175,7 @@ class AzureOpenAIProvider(LLMProvider):
 
         instructions_parts: list[str] = []
         items: list[dict[str, Any]] = []
+        declared_call_ids: set[str] = set()
 
         for idx, msg in enumerate(sanitized):
             role = msg.get("role")
@@ -193,36 +196,47 @@ class AzureOpenAIProvider(LLMProvider):
                 coerced = self._coerce_text_content(content)
                 if coerced is None:
                     coerced = ""
-                items.append({"role": "user", "content": coerced})
+                items.append({"type": "message", "role": "user", "content": coerced})
                 continue
 
             if role == "assistant":
                 coerced = self._coerce_text_content(content)
                 if coerced not in (None, "", []):
-                    items.append({"role": "assistant", "content": coerced})
+                    items.append({"type": "message", "role": "assistant", "content": coerced})
                 for tool_call in msg.get("tool_calls") or []:
                     if not isinstance(tool_call, dict):
                         continue
                     fn = tool_call.get("function") or {}
+                    name = str(fn.get("name") or "").strip()
+                    if not name:
+                        logger.error("Dropping Azure Responses function_call with empty name from reconstructed history: {}", tool_call)
+                        continue
                     call_id, item_id = self._split_tool_call_id(tool_call.get("id"))
                     arguments = fn.get("arguments") or "{}"
                     if isinstance(arguments, dict):
                         arguments = json.dumps(arguments, ensure_ascii=False)
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, ensure_ascii=False)
+                    resolved_call_id = call_id or f"call_{idx}_{uuid.uuid4().hex[:8]}"
+                    declared_call_ids.add(resolved_call_id)
                     items.append({
                         "type": "function_call",
                         "id": item_id or f"fc_{idx}_{uuid.uuid4().hex[:8]}",
-                        "call_id": call_id or f"call_{idx}_{uuid.uuid4().hex[:8]}",
-                        "name": fn.get("name"),
+                        "call_id": resolved_call_id,
+                        "name": name,
                         "arguments": arguments,
                     })
                 continue
 
             if role == "tool":
                 call_id, _ = self._split_tool_call_id(msg.get("tool_call_id"))
+                if not call_id or call_id not in declared_call_ids:
+                    logger.error("Dropping Azure Responses function_call_output with unknown call_id from reconstructed history: {}", msg.get("tool_call_id"))
+                    continue
                 output = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
                 items.append({
                     "type": "function_call_output",
-                    "call_id": call_id or f"call_{idx}_{uuid.uuid4().hex[:8]}",
+                    "call_id": call_id,
                     "output": output,
                 })
 
@@ -271,6 +285,7 @@ class AzureOpenAIProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
+        previous_response_id: str | None = None,
     ) -> dict[str, Any]:
         instructions, input_items = self._prepare_responses_input(messages)
         payload: dict[str, Any] = {
@@ -278,6 +293,9 @@ class AzureOpenAIProvider(LLMProvider):
             "input": input_items,
             "max_output_tokens": max(1, max_tokens),
         }
++
++        if previous_response_id:
++            payload["previous_response_id"] = previous_response_id
 
         if instructions:
             payload["instructions"] = instructions
@@ -359,12 +377,15 @@ class AzureOpenAIProvider(LLMProvider):
             content = self._extract_text_from_output(output)
             tool_calls = self._extract_tool_calls(output)
             finish_reason = str(response.get("status") or "stop")
-            return LLMResponse(
+            parsed = LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
                 usage=self._extract_usage(response),
             )
+            setattr(parsed, "provider_response_id", response.get("id"))
+            setattr(parsed, "provider_output_items", output)
+            return parsed
         except Exception as e:
             return LLMResponse(
                 content=f"Error parsing Azure OpenAI response: {str(e)}",
@@ -527,12 +548,14 @@ class AzureOpenAIProvider(LLMProvider):
                 )
             )
 
-        return LLMResponse(
+        parsed = LLMResponse(
             content="".join(content_parts) or None,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
         )
+        setattr(parsed, "provider_output_items", [])
+        return parsed
 
     def estimate_prompt_tokens(
         self,
