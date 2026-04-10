@@ -513,11 +513,11 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
-+
-+        if self.provider.__class__.__name__ == "AzureOpenAIProvider":
-+            previous_response_id = session.metadata.get("azure_previous_response_id")
-+            if previous_response_id:
-+                initial_messages[-1].setdefault("_meta", {})["azure_previous_response_id"] = previous_response_id
+
+        if self.provider.__class__.__name__ == "AzureOpenAIProvider":
+            previous_response_id = session.metadata.get("azure_previous_response_id")
+            if previous_response_id:
+                initial_messages[-1].setdefault("_meta", {})["azure_previous_response_id"] = previous_response_id
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
