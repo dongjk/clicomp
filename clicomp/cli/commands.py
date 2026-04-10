@@ -562,10 +562,17 @@ def agent(
         async def run_once():
             renderer = StreamRenderer(render_markdown=markdown) if stream else None
             local_thinking = ThinkingSpinner() if not stream else None
+            if ":" in session_id:
+                direct_channel, direct_chat_id = session_id.split(":", 1)
+            else:
+                direct_channel, direct_chat_id = "cli", session_id
             if local_thinking:
                 local_thinking.__enter__()
             response = await agent_loop.process_direct(
-                message, session_id,
+                message,
+                session_id,
+                channel=direct_channel,
+                chat_id=direct_chat_id,
                 on_progress=_cli_progress,
                 on_stream=renderer.on_delta if renderer else None,
                 on_stream_end=renderer.on_end if renderer else None,

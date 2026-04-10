@@ -629,8 +629,14 @@ class AgentLoop:
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
-        """Process a message directly and return the outbound payload."""
+        """Process a message directly and return the outbound payload.
+
+        When only ``session_key`` is provided, derive channel/chat_id from it so
+        direct mode and bus/interactive mode share identical session routing.
+        """
         await self._connect_mcp()
+        if session_key and (channel, chat_id) == ("cli", "direct") and ":" in session_key:
+            channel, chat_id = session_key.split(":", 1)
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         return await self._process_message(
             msg, session_key=session_key, on_progress=on_progress,
