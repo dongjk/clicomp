@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime
 from typing import Any
 
 from clicomp import __version__
@@ -13,6 +14,59 @@ from clicomp.bus.events import OutboundMessage
 from clicomp.command.router import CommandContext, CommandRouter
 from clicomp.providers.base import GenerationSettings
 from clicomp.utils.helpers import build_status_content
+
+
+def _parse_history_ranges(spec: str) -> tuple[set[int], str | None]:
+    """Parse 1-based line ranges like '1-3,7,10-12'."""
+    text = (spec or "").strip()
+    if not text:
+        return set(), "Usage: /del 1-3,7,10-12"
+
+    selected: set[int] = set()
+    for raw_part in text.split(","):
+        part = raw_part.strip()
+        if not part:
+            return set(), f"Invalid empty range in: {spec}"
+        if "-" in part:
+            left, right = part.split("-", 1)
+            if not left.strip().isdigit() or not right.strip().isdigit():
+                return set(), f"Invalid range: {part}"
+            start = int(left)
+            end = int(right)
+            if start <= 0 or end <= 0:
+                return set(), f"Line numbers must be >= 1: {part}"
+            if start > end:
+                return set(), f"Invalid descending range: {part}"
+            selected.update(range(start, end + 1))
+        else:
+            if not part.isdigit():
+                return set(), f"Invalid line number: {part}"
+            line_no = int(part)
+            if line_no <= 0:
+                return set(), f"Line numbers must be >= 1: {part}"
+            selected.add(line_no)
+
+    return selected, None
+
+
+def _history_view_indices(session) -> list[int]:
+    """Map current /history lines back to indices in session.messages."""
+    unconsolidated = session.messages[session.last_consolidated:]
+    offset = session.last_consolidated
+    sliced = unconsolidated
+
+    for i, message in enumerate(sliced):
+        if message.get("role") == "user":
+            sliced = sliced[i:]
+            offset += i
+            break
+
+    start = session._find_legal_start(sliced)
+    if start:
+        sliced = sliced[start:]
+        offset += start
+
+    return list(range(offset, offset + len(sliced)))
 
 
 _HISTORY_ROLE_LABEL = {
@@ -244,6 +298,74 @@ async def cmd_think(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_del(ctx: CommandContext) -> OutboundMessage:
+    """Delete selected history lines from the current session."""
+    loop = ctx.loop
+    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    selected, error = _parse_history_ranges(ctx.args)
+    if error:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=error,
+            metadata={"render_as": "text"},
+        )
+
+    visible_indices = _history_view_indices(session)
+    if not visible_indices:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="No message history to delete.",
+            metadata={"render_as": "text"},
+        )
+
+    max_line = len(visible_indices)
+    out_of_range = sorted(n for n in selected if n > max_line)
+    if out_of_range:
+        preview = ", ".join(map(str, out_of_range[:10]))
+        more = "..." if len(out_of_range) > 10 else ""
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=f"Line numbers out of range (1-{max_line}): {preview}{more}",
+            metadata={"render_as": "text"},
+        )
+
+    delete_indices = {visible_indices[line_no - 1] for line_no in selected}
+    if not delete_indices:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="No matching history lines selected.",
+            metadata={"render_as": "text"},
+        )
+
+    deleted_before_boundary = sum(1 for idx in delete_indices if idx < session.last_consolidated)
+    session.messages = [msg for idx, msg in enumerate(session.messages) if idx not in delete_indices]
+    if deleted_before_boundary:
+        session.last_consolidated = max(0, session.last_consolidated - deleted_before_boundary)
+    session.updated_at = datetime.now()
+    loop.sessions.save(session)
+
+    ctx_est = 0
+    try:
+        ctx_est, _ = loop.memory_consolidator.estimate_session_prompt_tokens(session)
+    except Exception:
+        pass
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=(
+            f"Deleted {len(delete_indices)} history line(s). "
+            f"Current visible history: {len(session.get_history(max_messages=0))} line(s). "
+            f"Estimated context: {ctx_est} tokens."
+        ),
+        metadata={"render_as": "text"},
+    )
+
+
 async def cmd_history(ctx: CommandContext) -> OutboundMessage:
     """List the current session message history with numbering."""
     loop = ctx.loop
@@ -277,6 +399,7 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/think — Show current reasoning level",
         "/think <none|low|medium|high> — Set reasoning level",
         "/history — Show current session message history",
+        "/del 1-3,7,10-12 — Delete selected history lines from current session",
         "/help — Show available commands",
     ]
     return OutboundMessage(
@@ -296,6 +419,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
     router.exact("/history", cmd_history)
+    router.prefix("/del ", cmd_del)
     router.exact("/model", cmd_model)
     router.prefix("/model ", cmd_model)
     router.exact("/think", cmd_think)
