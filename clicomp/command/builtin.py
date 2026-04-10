@@ -61,11 +61,13 @@ def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
     char_len = len(raw_content)
 
     content = " ".join(raw_content.split())
-    if len(content) > max_chars:
+    truncated = len(content) > max_chars
+    if truncated:
         content = content[: max_chars - 3].rstrip() + "..."
     if not content:
         content = "(empty)"
-    return f"{label} {content} ({char_len} chars)"
+    suffix = f" ({char_len} chars)" if truncated else ""
+    return f"{label} {content}{suffix}"
 
 
 def _available_models(loop) -> list[str]:
