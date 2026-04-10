@@ -438,8 +438,7 @@ async def cmd_show(ctx: CommandContext) -> OutboundMessage:
     return OutboundMessage(
         channel=ctx.msg.channel,
         chat_id=ctx.msg.chat_id,
-        content=f"{line_no}. {label}\n{content}",
-        metadata={"render_as": "text"},
+        content=f"{line_no}. {label}\n\n{content}",
     )
 
 
