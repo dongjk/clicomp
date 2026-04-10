@@ -179,7 +179,7 @@ class AgentLoop:
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
-        """Remove <think>…</think> blocks that some models embed in content."""
+        """Remove <think>...</think> blocks that some models embed in content."""
         if not text:
             return None
         from clicomp.utils.helpers import strip_think
@@ -193,7 +193,7 @@ class AgentLoop:
             val = next(iter(args.values()), None) if isinstance(args, dict) else None
             if not isinstance(val, str):
                 return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+            return f'{tc.name}("{val[:40]}...")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
     async def _run_agent_loop(
@@ -285,10 +285,21 @@ class AgentLoop:
                     tool_hint = self._strip_think(tool_hint)
                     await on_progress(tool_hint, tool_hint=True)
 
-                tool_call_dicts = [
-                    tc.to_openai_tool_call()
-                    for tc in response.tool_calls
-                ]
+                valid_tool_calls = []
+                tool_call_dicts = []
+                normalized_tool_names: list[str] = []
+                for tc in response.tool_calls:
+                    tool_name = (tc.name or "").strip()
+                    args_str = json.dumps(tc.arguments, ensure_ascii=False)
+                    if not tool_name:
+                        logger.error("Dropping tool call with empty name before execution/history write: {}", args_str[:200])
+                        continue
+                    logger.info("Tool call: {}({})", tool_name, args_str[:200])
+                    valid_tool_calls.append(tc)
+                    tool_call_dicts.append(tc.to_openai_tool_call())
+                    normalized_tool_names.append(tool_name)
+                    tools_used.append(tool_name)
+
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
@@ -297,13 +308,9 @@ class AgentLoop:
                 if provider_meta:
                     messages[-1].setdefault("_meta", {}).update(provider_meta)
 
-                normalized_tool_names: list[str] = []
-                for tc in response.tool_calls:
-                    tool_name = (tc.name or "").strip() or "(missing tool name)"
-                    normalized_tool_names.append(tool_name)
-                    tools_used.append(tool_name)
-                    args_str = json.dumps(tc.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tool_name, args_str[:200])
+                if not valid_tool_calls:
+                    final_content = self._strip_think(response.content)
+                    break
 
                 # Re-bind tool context right before execution so that
                 # concurrent sessions don't clobber each other's routing.
@@ -313,13 +320,13 @@ class AgentLoop:
                 # independent calls in a single response on purpose.
                 # return_exceptions=True ensures all results are collected
                 # even if one tool is cancelled or raises BaseException.
-                logger.info("Agent loop iteration {} executing {} tool call(s)", iteration, len(response.tool_calls))
-                results = await asyncio.gather(*(
+                logger.info("Agent loop iteration {} executing {} tool call(s)", iteration, len(valid_tool_calls))
+                results = await asyncio.gather(*( 
                     self.tools.execute(tool_name, tc.arguments)
-                    for tc, tool_name in zip(response.tool_calls, normalized_tool_names)
+                    for tc, tool_name in zip(valid_tool_calls, normalized_tool_names)
                 ), return_exceptions=True)
 
-                for tool_call, tool_name, result in zip(response.tool_calls, normalized_tool_names, results):
+                for tool_call, tool_name, result in zip(valid_tool_calls, normalized_tool_names, results):
                     if isinstance(result, BaseException):
                         logger.warning("Agent loop iteration {} tool {} raised {}", iteration, tool_name, type(result).__name__)
                         result = f"Error: {type(result).__name__}: {result}"
@@ -613,7 +620,7 @@ class AgentLoop:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
-                continue  # skip empty assistant messages — they poison session context
+                continue  # skip empty assistant messages - they poison session context
             if role == "tool":
                 if isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
                     entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"

@@ -494,8 +494,10 @@ class AzureOpenAIProvider(LLMProvider):
     ) -> LLMResponse:
         content_parts: list[str] = []
         tool_call_buffers: dict[str, dict[str, str]] = {}
+        tool_call_order: list[str] = []
         finish_reason = "stop"
         usage: dict[str, int] = {}
+        response_id: str | None = None
 
         async for line in response.aiter_lines():
             if not line.startswith("data:"):
@@ -519,14 +521,22 @@ class AzureOpenAIProvider(LLMProvider):
                 item = event.get("item") or {}
                 if item.get("type") == "function_call":
                     key = str(item.get("call_id") or item.get("id") or uuid.uuid4().hex[:9])
-                    tool_call_buffers.setdefault(key, {
+                    if key not in tool_call_buffers:
+                        tool_call_order.append(key)
+                    buf = tool_call_buffers.setdefault(key, {
                         "id": key,
-                        "name": str(item.get("name") or ""),
-                        "arguments": str(item.get("arguments") or ""),
+                        "name": "",
+                        "arguments": "",
                     })
+                    if item.get("name"):
+                        buf["name"] = str(item.get("name") or "")
+                    if item.get("arguments"):
+                        buf["arguments"] = str(item.get("arguments") or "")
             elif event_type == "response.function_call_arguments.delta":
                 call_id = str(event.get("call_id") or event.get("item_id") or "")
                 if call_id:
+                    if call_id not in tool_call_buffers:
+                        tool_call_order.append(call_id)
                     buf = tool_call_buffers.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
                     delta = event.get("delta")
                     if isinstance(delta, str):
@@ -534,12 +544,15 @@ class AzureOpenAIProvider(LLMProvider):
             elif event_type == "response.function_call_arguments.done":
                 call_id = str(event.get("call_id") or event.get("item_id") or "")
                 if call_id:
+                    if call_id not in tool_call_buffers:
+                        tool_call_order.append(call_id)
                     buf = tool_call_buffers.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
                     args = event.get("arguments")
                     if isinstance(args, str):
                         buf["arguments"] = args
             elif event_type == "response.completed":
                 resp = event.get("response") or {}
+                response_id = resp.get("id") or response_id
                 finish_reason = str(resp.get("status") or "stop")
                 usage = self._extract_usage(resp)
             elif event_type == "response.failed":
@@ -550,8 +563,26 @@ class AzureOpenAIProvider(LLMProvider):
                     finish_reason="error",
                 )
 
+        ordered_buffers = [tool_call_buffers[key] for key in tool_call_order if key in tool_call_buffers]
+        merged_buffers: list[dict[str, str]] = []
+        for buf in ordered_buffers:
+            name = (buf.get("name") or "").strip()
+            arguments = buf.get("arguments") or ""
+            if not name and arguments and merged_buffers:
+                prev = merged_buffers[-1]
+                prev_name = (prev.get("name") or "").strip()
+                prev_arguments = prev.get("arguments") or ""
+                if prev_name and not prev_arguments:
+                    prev["arguments"] = arguments
+                    continue
+            merged_buffers.append(buf)
+
         tool_calls = []
-        for buf in tool_call_buffers.values():
+        for buf in merged_buffers:
+            name = (buf.get("name") or "").strip()
+            if not name:
+                logger.error("Dropping Azure streamed function_call with empty name after merge: {}", buf)
+                continue
             args_raw = buf.get("arguments") or "{}"
             try:
                 args = json_repair.loads(args_raw) if isinstance(args_raw, str) else args_raw
@@ -562,7 +593,7 @@ class AzureOpenAIProvider(LLMProvider):
             tool_calls.append(
                 ToolCallRequest(
                     id=buf["id"],
-                    name=buf.get("name", ""),
+                    name=name,
                     arguments=args,
                 )
             )
@@ -573,6 +604,7 @@ class AzureOpenAIProvider(LLMProvider):
             finish_reason=finish_reason,
             usage=usage,
         )
+        setattr(parsed, "provider_response_id", response_id)
         setattr(parsed, "provider_output_items", [])
         return parsed
 
