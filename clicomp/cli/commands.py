@@ -488,6 +488,54 @@ def _migrate_cron_store(config: "Config") -> None:
         shutil.move(str(legacy_path), str(new_path))
 
 
+def _migrate_repo_local_sessions(config: "Config") -> None:
+    """One-time migration: move repo-local .clicomp/sessions into workspace/sessions."""
+    legacy_dir = Path.cwd() / ".clicomp" / "sessions"
+    target_dir = config.workspace_path / "sessions"
+    if not legacy_dir.is_dir():
+        return
+
+    import shutil
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for source in legacy_dir.glob("*.jsonl"):
+        target = target_dir / source.name
+        if target.exists():
+            continue
+        shutil.move(str(source), str(target))
+
+    # Normalize accidentally de-prefixed CLI session files from older builds,
+    # e.g. create-skill.jsonl -> cli_create-skill.jsonl. If both exist, merge the
+    # bare session into the normalized one and remove the duplicate.
+    for source in list(target_dir.glob("*.jsonl")):
+        if source.name.startswith(("cli_", "archive")):
+            continue
+        normalized = target_dir / f"cli_{source.name}"
+        if normalized.exists():
+            try:
+                with open(source, encoding="utf-8") as sf:
+                    source_lines = [line for line in sf if line.strip()]
+                with open(normalized, encoding="utf-8") as nf:
+                    normalized_lines = [line for line in nf if line.strip()]
+                source_msgs = source_lines[1:]
+                normalized_msgs = normalized_lines[1:]
+                existing = set(normalized_msgs)
+                merged_msgs = normalized_msgs + [line for line in source_msgs if line not in existing]
+                if normalized_lines:
+                    metadata = json.loads(normalized_lines[0])
+                    metadata["updated_at"] = datetime.now().isoformat()
+                    metadata["key"] = f"cli:{source.stem}"
+                    with open(normalized, "w", encoding="utf-8") as out:
+                        out.write(json.dumps(metadata, ensure_ascii=False) + "\n")
+                        for line in merged_msgs:
+                            out.write(line if line.endswith("\n") else line + "\n")
+                source.unlink(missing_ok=True)
+            except Exception:
+                continue
+        else:
+            shutil.move(str(source), str(normalized))
+
+
 # ============================================================================
 # Agent Commands
 # ============================================================================
@@ -512,6 +560,7 @@ def agent(
 
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
+    _migrate_repo_local_sessions(config)
 
     bus = MessageBus()
     provider = _make_provider(config)
