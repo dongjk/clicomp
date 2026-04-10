@@ -385,7 +385,7 @@ def _make_provider(config: Config):
         has_api_base = bool(p and p.api_base)
         if not p or not has_api_base or (not use_managed_identity and not has_api_key):
             console.print("[red]Error: Azure OpenAI requires api_base and either api_key or managed identity.[/red]")
-            console.print("Set them in ~/.clicomp/config.json under providers.azure_openai section")
+            console.print("Set them in ./.clicomp/config.json under providers.azure_openai section")
             console.print("Use the model field to specify the deployment name.")
             raise typer.Exit(1)
     elif backend == "openai_compat" and not model.startswith("bedrock/"):
@@ -393,7 +393,7 @@ def _make_provider(config: Config):
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
             console.print("[red]Error: No API key configured.[/red]")
-            console.print("Set one in ~/.clicomp/config.json under providers section")
+            console.print("Set one in ./.clicomp/config.json under providers section")
             raise typer.Exit(1)
 
     # --- instantiation by backend ---

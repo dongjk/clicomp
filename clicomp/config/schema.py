@@ -31,7 +31,7 @@ class ChannelsConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
-    workspace: str = "~/.clicomp/workspace"
+    workspace: str = ".clicomp/workspace"
     model: str = "anthropic/claude-opus-4-5"
     provider: str = (
         "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection

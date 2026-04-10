@@ -77,4 +77,14 @@ def _migrate_config(data: dict) -> dict:
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+
+    # Old defaults used ~/.clicomp/workspace, which created split state between
+    # the repo-local .clicomp instance and the home directory. Normalize legacy
+    # default workspace to the current instance-local path.
+    agents = data.get("agents", {})
+    defaults = agents.get("defaults", {})
+    workspace = defaults.get("workspace")
+    if workspace == "~/.clicomp/workspace":
+        defaults["workspace"] = ".clicomp/workspace"
+
     return data
