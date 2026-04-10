@@ -58,14 +58,14 @@ def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
     label = _HISTORY_ROLE_LABEL.get(role, "[?]")
 
     raw_content = _stringify_history_content(message.get("content"))
-    byte_len = len(raw_content.encode("utf-8"))
+    char_len = len(raw_content)
 
     content = " ".join(raw_content.split())
     if len(content) > max_chars:
         content = content[: max_chars - 3].rstrip() + "..."
     if not content:
         content = "(empty)"
-    return f"{label} {content} ({byte_len}B)"
+    return f"{label} {content} ({char_len} chars)"
 
 
 def _available_models(loop) -> list[str]:
