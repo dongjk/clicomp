@@ -503,6 +503,8 @@ def _normalize_cli_session_key(session_id: str) -> str:
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
+    model: str | None = typer.Option(None, "--model", help="Override model for this run"),
+    think: str | None = typer.Option(None, "--think", help="Override reasoning effort for this run (none|low|medium|high)"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
@@ -522,6 +524,20 @@ def agent(
     bus = MessageBus()
     provider = _make_provider(config)
 
+    if think is not None:
+        requested_think = think.strip().lower()
+        allowed = {"none", "low", "medium", "high"}
+        if requested_think not in allowed:
+            console.print("[red]Error: --think must be one of: none, low, medium, high[/red]")
+            raise typer.Exit(1)
+        provider.generation = GenerationSettings(
+            temperature=provider.generation.temperature,
+            max_tokens=provider.generation.max_tokens,
+            reasoning_effort=None if requested_think == "none" else requested_think,
+            timeout=provider.generation.timeout,
+            retry_delays=provider.generation.retry_delays,
+        )
+
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
         _migrate_cron_store(config)
@@ -539,7 +555,7 @@ def agent(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=model or config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         context_window_tokens=config.agents.defaults.context_window_tokens,
         web_search_config=config.tools.web.search,
