@@ -13,6 +13,7 @@ import httpx
 import json_repair
 
 from clicomp.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from clicomp.utils.helpers import estimate_prompt_tokens
 
 _AZURE_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
 
@@ -532,6 +533,19 @@ class AzureOpenAIProvider(LLMProvider):
             finish_reason=finish_reason,
             usage=usage,
         )
+
+    def estimate_prompt_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+    ) -> tuple[int, str]:
+        instructions, input_items = self._prepare_responses_input(messages)
+        parts: list[dict[str, Any]] = []
+        if instructions:
+            parts.append({"role": "system", "content": instructions})
+        parts.extend(input_items)
+        return estimate_prompt_tokens(parts, self._convert_tools(tools)), "azure_responses_estimate"
 
     def get_default_model(self) -> str:
         return self.default_model
