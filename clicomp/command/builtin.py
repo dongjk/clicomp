@@ -3,14 +3,78 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+from typing import Any
 
 from clicomp import __version__
 from clicomp.bus.events import OutboundMessage
 from clicomp.command.router import CommandContext, CommandRouter
 from clicomp.providers.base import GenerationSettings
 from clicomp.utils.helpers import build_status_content
+
+
+_HISTORY_ROLE_EMOJI = {
+    "user": "👤",
+    "assistant": "🤖",
+    "tool": "🛠️",
+    "system": "⚙️",
+}
+
+
+def _stringify_history_content(content: Any) -> str:
+    """Flatten message content into one readable line."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type in {"text", "input_text", "output_text"}:
+                    text = item.get("text")
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+                elif item_type == "image_url":
+                    parts.append("[image]")
+                else:
+                    rendered = json.dumps(item, ensure_ascii=False)
+                    if rendered:
+                        parts.append(rendered)
+            elif item is not None:
+                parts.append(str(item))
+        return " ".join(part for part in parts if part)
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=False)
+    return str(content)
+
+
+def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
+    """Render one compact one-line preview for /history."""
+    role = str(message.get("role") or "assistant")
+    emoji = _HISTORY_ROLE_EMOJI.get(role, "💬")
+
+    content = _stringify_history_content(message.get("content"))
+    if not content and message.get("tool_calls"):
+        tool_names = []
+        for tc in message.get("tool_calls") or []:
+            if isinstance(tc, dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name") or tc.get("name")
+                if name:
+                    tool_names.append(str(name))
+        if tool_names:
+            content = f"[tool calls] {', '.join(tool_names)}"
+
+    content = " ".join(content.split())
+    if len(content) > max_chars:
+        content = content[: max_chars - 3].rstrip() + "..."
+    if not content:
+        content = "(empty)"
+    return f"{emoji} {content}"
 
 
 def _available_models(loop) -> list[str]:
@@ -187,6 +251,26 @@ async def cmd_think(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_history(ctx: CommandContext) -> OutboundMessage:
+    """List the current session message history with numbering."""
+    loop = ctx.loop
+    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    history = session.get_history(max_messages=0)
+
+    if not history:
+        content = "No message history yet."
+    else:
+        lines = [f"{idx}. {_history_preview(message)}" for idx, message in enumerate(history, start=1)]
+        content = "\n".join(lines)
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=content,
+        metadata={"render_as": "text"},
+    )
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     lines = [
@@ -199,6 +283,7 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/model <name> — Switch to a model",
         "/think — Show current reasoning level",
         "/think <none|low|medium|high> — Set reasoning level",
+        "/history — Show current session message history",
         "/help — Show available commands",
     ]
     return OutboundMessage(
@@ -217,6 +302,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/new", cmd_new)
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
+    router.exact("/history", cmd_history)
     router.exact("/model", cmd_model)
     router.prefix("/model ", cmd_model)
     router.exact("/think", cmd_think)
