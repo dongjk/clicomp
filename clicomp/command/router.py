@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from clicomp.bus.events import OutboundMessage
+
 if TYPE_CHECKING:
-    from clicomp.bus.events import InboundMessage, OutboundMessage
+    from clicomp.bus.events import InboundMessage
     from clicomp.session.manager import Session
 
 Handler = Callable[["CommandContext"], Awaitable["OutboundMessage | None"]]
@@ -54,6 +56,10 @@ class CommandRouter:
     def intercept(self, handler: Handler) -> None:
         self._interceptors.append(handler)
 
+    @staticmethod
+    def is_slash_command(text: str) -> bool:
+        return text.strip().startswith("/")
+
     def is_priority(self, text: str) -> bool:
         return text.strip().lower() in self._priority
 
@@ -80,5 +86,14 @@ class CommandRouter:
             result = await interceptor(ctx)
             if result is not None:
                 return result
+
+        if self.is_slash_command(ctx.raw):
+            head = ctx.raw.split(None, 1)[0] if ctx.raw else "/"
+            return OutboundMessage(
+                channel=ctx.msg.channel,
+                chat_id=ctx.msg.chat_id,
+                content=f"Unknown command: {head}\nUse /help to see available commands.",
+                metadata={"render_as": "text"},
+            )
 
         return None
