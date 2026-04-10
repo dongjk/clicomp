@@ -293,9 +293,9 @@ class AzureOpenAIProvider(LLMProvider):
             "input": input_items,
             "max_output_tokens": max(1, max_tokens),
         }
-+
-+        if previous_response_id:
-+            payload["previous_response_id"] = previous_response_id
+
+        if previous_response_id:
+            payload["previous_response_id"] = previous_response_id
 
         if instructions:
             payload["instructions"] = instructions
