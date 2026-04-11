@@ -97,10 +97,9 @@ def _restore_terminal() -> None:
 
 
 def _init_prompt_session() -> None:
-    """Create the prompt_toolkit session with persistent file history."""
+    """Create the prompt_toolkit session with multiline history support."""
     global _PROMPT_SESSION, _SAVED_TERM_ATTRS
 
-    # Save terminal state so we can restore it on exit
     try:
         import termios
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
@@ -115,11 +114,11 @@ def _init_prompt_session() -> None:
     bindings = KeyBindings()
 
     @bindings.add("enter")
-    def _accept(event) -> None:
+    def _submit(event) -> None:
         event.current_buffer.validate_and_handle()
 
-    @bindings.add("escape", "enter")
-    def _insert_newline(event) -> None:
+    @bindings.add("c-j")
+    def _newline(event) -> None:
         event.current_buffer.insert_text("\n")
 
     _PROMPT_SESSION = PromptSession(
@@ -231,12 +230,11 @@ def _is_exit_command(command: str) -> bool:
 
 
 async def _read_interactive_input_async() -> str:
-    """Read user input using prompt_toolkit (handles paste, history, display).
+    """Read user input using prompt_toolkit multiline editing.
 
-    prompt_toolkit natively handles:
-    - Multiline paste (bracketed paste mode)
-    - History navigation (up/down arrows)
-    - Clean display (no ghost characters or artifacts)
+    In multiline mode, Enter inserts a newline and Meta+Enter (Esc+Enter)
+    submits the current buffer. This preserves pasted multiline blocks and
+    keeps history navigation working.
     """
     if _PROMPT_SESSION is None:
         raise RuntimeError("Call _init_prompt_session() first")
