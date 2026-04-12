@@ -272,20 +272,6 @@ def build_status_content(
         f"\U0001f4ca Tokens: {last_in} in / {last_out} out",
         f"\U0001f4da Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}%)",
     ]
-    if any(v is not None for v in (context_input_tokens, context_output_reserve, context_reasoning_reserve, context_safety_buffer)):
-        parts = []
-        if context_input_tokens is not None:
-            parts.append(f"in {context_input_tokens}")
-        if context_output_reserve is not None:
-            parts.append(f"out-reserve {context_output_reserve}")
-        if context_reasoning_reserve is not None:
-            parts.append(f"reasoning-reserve {context_reasoning_reserve}")
-        if context_safety_buffer is not None:
-            parts.append(f"safety {context_safety_buffer}")
-        detail = " + ".join(parts)
-        if context_source:
-            detail += f" [{context_source}]"
-        lines.append(f"   {detail}")
     lines.extend([
         f"\U0001f4ac Session: {session_msg_count} messages",
         f"\u23f1 Uptime: {uptime}",
