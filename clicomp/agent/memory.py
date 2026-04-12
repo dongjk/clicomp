@@ -13,6 +13,16 @@ from loguru import logger
 
 from clicomp.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
 
+
+_REASONING_RESERVE_MAP = {
+    "none": 0,
+    "minimal": 1024,
+    "low": 4096,
+    "medium": 12288,
+    "high": 24576,
+    "xhigh": 49152,
+}
+
 if TYPE_CHECKING:
     from clicomp.providers.base import LLMProvider
     from clicomp.session.manager import Session, SessionManager
@@ -294,6 +304,30 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
+    def estimate_effective_context_window_usage(self, session: Session) -> dict[str, int | str]:
+        """Estimate context-window pressure in a provider-facing way.
+
+        This is intentionally more conservative than raw prompt size: it models
+        current input size plus reserved output tokens, reasoning headroom, and a
+        safety buffer so status display and consolidation decisions align more
+        closely with actual model context-window pressure.
+        """
+        prompt_tokens, source = self.estimate_session_prompt_tokens(session)
+        reasoning_effort = (self.provider.generation.reasoning_effort or "none").lower()
+        reasoning_reserve = _REASONING_RESERVE_MAP.get(reasoning_effort, _REASONING_RESERVE_MAP["medium"])
+        output_reserve = max(0, int(self.max_completion_tokens or 0))
+        safety_buffer = self._SAFETY_BUFFER
+        effective = max(0, prompt_tokens) + output_reserve + reasoning_reserve + safety_buffer
+        return {
+            "input_tokens": max(0, int(prompt_tokens or 0)),
+            "output_reserve": output_reserve,
+            "reasoning_reserve": reasoning_reserve,
+            "safety_buffer": safety_buffer,
+            "effective_tokens": effective,
+            "context_window_tokens": max(0, int(self.context_window_tokens or 0)),
+            "source": source,
+        }
+
     async def archive_messages(self, messages: list[dict[str, object]]) -> bool:
         """Archive messages with guaranteed persistence (retries until raw-dump fallback)."""
         if not messages:
@@ -306,25 +340,35 @@ class MemoryConsolidator:
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
         """Loop: archive old messages until prompt fits within safe budget.
 
-        The budget reserves space for completion tokens and a safety buffer
-        so the LLM request never exceeds the context window.
+        The budget uses an effective window estimate: current input size plus
+        reserved output tokens, reasoning headroom, and a safety buffer. This
+        tracks provider-facing context pressure more closely than raw prompt size.
         """
         if not session.messages or self.context_window_tokens <= 0:
             return
 
         lock = self.get_lock(session.key)
         async with lock:
-            budget = self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
-            target = budget // 2
-            estimated, source = self.estimate_session_prompt_tokens(session)
+            snapshot = self.estimate_effective_context_window_usage(session)
+            estimated = int(snapshot["effective_tokens"])
+            input_tokens = int(snapshot["input_tokens"])
+            output_reserve = int(snapshot["output_reserve"])
+            reasoning_reserve = int(snapshot["reasoning_reserve"])
+            safety_buffer = int(snapshot["safety_buffer"])
+            source = str(snapshot["source"])
+            target = self.context_window_tokens // 2
             if estimated <= 0:
                 return
-            if estimated < budget:
+            if estimated < self.context_window_tokens:
                 logger.debug(
-                    "Token consolidation idle {}: {}/{} via {}",
+                    "Token consolidation idle {}: effective={}/{} input={} out_reserve={} reasoning_reserve={} safety={} via {}",
                     session.key,
                     estimated,
                     self.context_window_tokens,
+                    input_tokens,
+                    output_reserve,
+                    reasoning_reserve,
+                    safety_buffer,
                     source,
                 )
                 return
@@ -333,7 +377,8 @@ class MemoryConsolidator:
                 if estimated <= target:
                     return
 
-                boundary = self.pick_consolidation_boundary(session, max(1, estimated - target))
+                tokens_to_remove = max(1, estimated - target)
+                boundary = self.pick_consolidation_boundary(session, tokens_to_remove)
                 if boundary is None:
                     logger.debug(
                         "Token consolidation: no safe boundary for {} (round {})",
@@ -348,11 +393,15 @@ class MemoryConsolidator:
                     return
 
                 logger.info(
-                    "Token consolidation round {} for {}: {}/{} via {}, chunk={} msgs",
+                    "Token consolidation round {} for {}: effective={}/{} input={} out_reserve={} reasoning_reserve={} safety={} via {}, chunk={} msgs",
                     round_num,
                     session.key,
                     estimated,
                     self.context_window_tokens,
+                    input_tokens,
+                    output_reserve,
+                    reasoning_reserve,
+                    safety_buffer,
                     source,
                     len(chunk),
                 )
@@ -361,6 +410,12 @@ class MemoryConsolidator:
                 session.last_consolidated = end_idx
                 self.sessions.save(session)
 
-                estimated, source = self.estimate_session_prompt_tokens(session)
+                snapshot = self.estimate_effective_context_window_usage(session)
+                estimated = int(snapshot["effective_tokens"])
+                input_tokens = int(snapshot["input_tokens"])
+                output_reserve = int(snapshot["output_reserve"])
+                reasoning_reserve = int(snapshot["reasoning_reserve"])
+                safety_buffer = int(snapshot["safety_buffer"])
+                source = str(snapshot["source"])
                 if estimated <= 0:
                     return

@@ -246,6 +246,11 @@ def build_status_content(
     session_msg_count: int,
     context_tokens_estimate: int,
     reasoning_effort: str | None = None,
+    context_input_tokens: int | None = None,
+    context_output_reserve: int | None = None,
+    context_reasoning_reserve: int | None = None,
+    context_safety_buffer: int | None = None,
+    context_source: str | None = None,
 ) -> str:
     """Build a human-readable runtime status snapshot."""
     uptime_s = int(time.time() - start_time)
@@ -260,15 +265,32 @@ def build_status_content(
     ctx_pct = int((context_tokens_estimate / ctx_total) * 100) if ctx_total > 0 else 0
     ctx_used_str = f"{context_tokens_estimate // 1000}k" if context_tokens_estimate >= 1000 else str(context_tokens_estimate)
     ctx_total_str = f"{ctx_total // 1024}k" if ctx_total > 0 else "n/a"
-    return "\n".join([
+    lines = [
         f"\U0001f408 clicomp v{version}",
         f"\U0001f9e0 Model: {model}",
         f"\U0001f914 Thinking: {reasoning_effort or 'none'}",
         f"\U0001f4ca Tokens: {last_in} in / {last_out} out",
         f"\U0001f4da Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}%)",
+    ]
+    if any(v is not None for v in (context_input_tokens, context_output_reserve, context_reasoning_reserve, context_safety_buffer)):
+        parts = []
+        if context_input_tokens is not None:
+            parts.append(f"in {context_input_tokens}")
+        if context_output_reserve is not None:
+            parts.append(f"out-reserve {context_output_reserve}")
+        if context_reasoning_reserve is not None:
+            parts.append(f"reasoning-reserve {context_reasoning_reserve}")
+        if context_safety_buffer is not None:
+            parts.append(f"safety {context_safety_buffer}")
+        detail = " + ".join(parts)
+        if context_source:
+            detail += f" [{context_source}]"
+        lines.append(f"   {detail}")
+    lines.extend([
         f"\U0001f4ac Session: {session_msg_count} messages",
         f"\u23f1 Uptime: {uptime}",
     ])
+    return "\n".join(lines)
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:

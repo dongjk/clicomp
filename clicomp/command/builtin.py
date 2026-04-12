@@ -194,9 +194,11 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
     """Build an outbound status message for a session."""
     loop = ctx.loop
     session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    snapshot: dict[str, int | str] | None = None
     ctx_est = 0
     try:
-        ctx_est, _ = loop.memory_consolidator.estimate_session_prompt_tokens(session)
+        snapshot = loop.memory_consolidator.estimate_effective_context_window_usage(session)
+        ctx_est = int(snapshot["effective_tokens"])
     except Exception:
         pass
     if ctx_est <= 0:
@@ -211,6 +213,11 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
             session_msg_count=len(session.get_history(max_messages=0)),
             context_tokens_estimate=ctx_est,
             reasoning_effort=loop.provider.generation.reasoning_effort,
+            context_input_tokens=int(snapshot["input_tokens"]) if snapshot else None,
+            context_output_reserve=int(snapshot["output_reserve"]) if snapshot else None,
+            context_reasoning_reserve=int(snapshot["reasoning_reserve"]) if snapshot else None,
+            context_safety_buffer=int(snapshot["safety_buffer"]) if snapshot else None,
+            context_source=str(snapshot["source"]) if snapshot else None,
         ),
         metadata={"render_as": "text"},
     )
