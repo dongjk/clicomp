@@ -95,6 +95,7 @@ class Session:
         """Clear all messages and reset session to initial state."""
         self.messages = []
         self.last_consolidated = 0
+        self.metadata.pop("azure_previous_response_id", None)
         self.updated_at = datetime.now()
 
     def retain_recent_legal_suffix(self, max_messages: int) -> None:

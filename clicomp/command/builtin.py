@@ -229,11 +229,16 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     session = ctx.session or loop.sessions.get_or_create(ctx.key)
     snapshot = session.messages[session.last_consolidated:]
     had_history = loop.sessions.archive_and_reset(session.key)
+    # Reset provider-side conversation chaining so the next turn is rebuilt
+    # strictly from local session history.
+    session = loop.sessions.get_or_create(ctx.key)
+    session.metadata.pop("azure_previous_response_id", None)
+    loop.sessions.save(session)
     if snapshot:
         loop._schedule_background(loop.memory_consolidator.archive_messages(snapshot))
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-        content="New session started. Previous session archived." if had_history else "New session started.",
+        content="New session started. Previous session archived. Remote response chain reset." if had_history else "New session started. Remote response chain reset.",
     )
 
 
@@ -365,6 +370,9 @@ async def cmd_del(ctx: CommandContext) -> OutboundMessage:
     session.messages = [msg for idx, msg in enumerate(session.messages) if idx not in delete_indices]
     if deleted_before_boundary:
         session.last_consolidated = max(0, session.last_consolidated - deleted_before_boundary)
+    # Deleting local history changes the intended prompt prefix, so clear any
+    # provider-side chained response id to avoid stale remote context.
+    session.metadata.pop("azure_previous_response_id", None)
     session.updated_at = datetime.now()
     loop.sessions.save(session)
 
@@ -380,7 +388,8 @@ async def cmd_del(ctx: CommandContext) -> OutboundMessage:
         content=(
             f"Deleted {len(delete_indices)} history line(s). "
             f"Current visible history: {len(session.get_history(max_messages=0))} line(s). "
-            f"Estimated context: {ctx_est} tokens."
+            f"Estimated context: {ctx_est} tokens. "
+            "Remote response chain reset."
         ),
         metadata={"render_as": "text"},
     )
