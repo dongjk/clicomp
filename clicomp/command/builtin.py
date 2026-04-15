@@ -238,7 +238,7 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
         loop._schedule_background(loop.memory_consolidator.archive_messages(snapshot))
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-        content="New session started. Previous session archived. Remote response chain reset." if had_history else "New session started. Remote response chain reset.",
+        content="New session started. Previous session archived." if had_history else "New session started.",
     )
 
 
@@ -388,8 +388,7 @@ async def cmd_del(ctx: CommandContext) -> OutboundMessage:
         content=(
             f"Deleted {len(delete_indices)} history line(s). "
             f"Current visible history: {len(session.get_history(max_messages=0))} line(s). "
-            f"Estimated context: {ctx_est} tokens. "
-            "Remote response chain reset."
+            f"Estimated context: {ctx_est} tokens."
         ),
         metadata={"render_as": "text"},
     )
