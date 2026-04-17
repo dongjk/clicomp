@@ -1,6 +1,7 @@
 """Session management for conversation history."""
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +25,7 @@ class Session:
     but does NOT modify the messages list or get_history() output.
     """
 
-    key: str  # channel:chat_id
+    key: str  # channel:chat_id or channel:chat_id#branch=<name>
     messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
@@ -132,23 +133,86 @@ class SessionManager:
     Sessions are stored as JSONL files in the sessions directory.
     """
 
+    BRANCH_MAIN = "main"
+
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.archive_dir = ensure_dir(self.sessions_dir / "archive")
         self._cache: dict[str, Session] = {}
 
+    @staticmethod
+    def split_branch_key(key: str) -> tuple[str, str]:
+        """Split a persisted key into base key and branch name."""
+        marker = "#branch="
+        if marker in key:
+            base, branch = key.split(marker, 1)
+            branch = branch.strip() or SessionManager.BRANCH_MAIN
+            return base, branch
+        return key, SessionManager.BRANCH_MAIN
+
+    @classmethod
+    def make_branch_key(cls, base_key: str, branch: str | None) -> str:
+        """Build the persisted session key for a branch."""
+        branch_name = (branch or cls.BRANCH_MAIN).strip() or cls.BRANCH_MAIN
+        if branch_name == cls.BRANCH_MAIN:
+            return base_key
+        return f"{base_key}#branch={branch_name}"
+
+    @classmethod
+    def branch_name_from_key(cls, key: str) -> str:
+        """Return the branch portion from a session key."""
+        return cls.split_branch_key(key)[1]
+
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
         safe_key = safe_filename(key.replace(":", "_"))
         return self.sessions_dir / f"{safe_key}.jsonl"
+
+    def _get_branch_meta_path(self, base_key: str) -> Path:
+        """Get the file path for current branch metadata."""
+        safe_key = safe_filename(base_key.replace(":", "_"))
+        return self.sessions_dir / f"{safe_key}.branches.json"
+
+    def get_current_branch(self, base_key: str) -> str:
+        """Return the currently selected branch for a base session."""
+        path = self._get_branch_meta_path(base_key)
+        if not path.exists():
+            return self.BRANCH_MAIN
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            branch = str(data.get("current") or self.BRANCH_MAIN).strip() or self.BRANCH_MAIN
+            return branch
+        except Exception as e:
+            logger.warning("Failed to load branch metadata for {}: {}", base_key, e)
+            return self.BRANCH_MAIN
+
+    def set_current_branch(self, base_key: str, branch: str) -> None:
+        """Persist the currently selected branch for a base session."""
+        branch_name = (branch or self.BRANCH_MAIN).strip() or self.BRANCH_MAIN
+        path = self._get_branch_meta_path(base_key)
+        payload = {
+            "base_key": base_key,
+            "current": branch_name,
+            "updated_at": datetime.now().isoformat(),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def resolve_active_key(self, key: str) -> str:
+        """Resolve a user-facing base session key to its active branch session key."""
+        base_key, branch = self.split_branch_key(key)
+        if branch != self.BRANCH_MAIN:
+            return key
+        current = self.get_current_branch(base_key)
+        return self.make_branch_key(base_key, current)
 
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
 
         Args:
-            key: Session key (usually channel:chat_id).
+            key: Session key (usually channel:chat_id or a branch session key).
 
         Returns:
             The session.
@@ -162,6 +226,84 @@ class SessionManager:
 
         self._cache[key] = session
         return session
+
+    def clone_session(self, source: Session, dest_key: str) -> Session:
+        """Create a new session by copying messages/metadata from another session."""
+        cloned = Session(
+            key=dest_key,
+            messages=deepcopy(source.messages),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            metadata=deepcopy(source.metadata),
+            last_consolidated=source.last_consolidated,
+        )
+        self.save(cloned)
+        return cloned
+
+    def switch_branch(self, base_key: str, branch: str) -> tuple[Session, bool]:
+        """Switch the active branch, creating it from the current branch if needed."""
+        branch_name = (branch or self.BRANCH_MAIN).strip() or self.BRANCH_MAIN
+        target_key = self.make_branch_key(base_key, branch_name)
+        target_path = self._get_session_path(target_key)
+        created = False
+
+        if target_key in self._cache:
+            session = self._cache[target_key]
+        elif target_path.exists():
+            session = self.get_or_create(target_key)
+        else:
+            if branch_name == self.BRANCH_MAIN:
+                session = self.get_or_create(base_key)
+            else:
+                source_key = self.resolve_active_key(base_key)
+                source = self.get_or_create(source_key)
+                session = self.clone_session(source, target_key)
+                created = True
+
+        self.set_current_branch(base_key, branch_name)
+        return session, created
+
+    def list_branches(self, base_key: str) -> list[dict[str, Any]]:
+        """List all branches known for a base session."""
+        current = self.get_current_branch(base_key)
+        branch_map: dict[str, dict[str, Any]] = {}
+
+        for path in self.sessions_dir.glob("*.jsonl"):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    first_line = f.readline().strip()
+                    if not first_line:
+                        continue
+                    data = json.loads(first_line)
+                    if data.get("_type") != "metadata":
+                        continue
+                    key = data.get("key") or path.stem.replace("_", ":", 1)
+                    session_base, branch = self.split_branch_key(key)
+                    if session_base != base_key:
+                        continue
+                    branch_map[branch] = {
+                        "branch": branch,
+                        "key": key,
+                        "created_at": data.get("created_at"),
+                        "updated_at": data.get("updated_at"),
+                        "current": branch == current,
+                    }
+            except Exception:
+                continue
+
+        if self.BRANCH_MAIN not in branch_map:
+            branch_map[self.BRANCH_MAIN] = {
+                "branch": self.BRANCH_MAIN,
+                "key": base_key,
+                "created_at": None,
+                "updated_at": None,
+                "current": self.BRANCH_MAIN == current,
+            }
+
+        return sorted(
+            branch_map.values(),
+            key=lambda item: (0 if item["branch"] == self.BRANCH_MAIN else 1, item["branch"]),
+        )
 
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""

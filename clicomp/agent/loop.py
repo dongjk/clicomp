@@ -170,12 +170,23 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        session_key: str | None = None,
+    ) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron"):
-            if tool := self.tools.get(name):
-                if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+        if tool := self.tools.get("message"):
+            if hasattr(tool, "set_context"):
+                tool.set_context(channel, chat_id, message_id)
+        if tool := self.tools.get("spawn"):
+            if hasattr(tool, "set_context"):
+                tool.set_context(channel, chat_id, session_key or f"{channel}:{chat_id}")
+        if tool := self.tools.get("cron"):
+            if hasattr(tool, "set_context"):
+                tool.set_context(channel, chat_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -385,19 +396,22 @@ class AgentLoop:
                 continue
 
             raw = msg.content.strip()
+            active_key = self.sessions.resolve_active_key(msg.session_key)
             if self.commands.is_priority(raw):
-                ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw=raw, loop=self)
+                session = self.sessions.get_or_create(active_key)
+                ctx = CommandContext(msg=msg, session=session, key=active_key, raw=raw, loop=self)
                 result = await self.commands.dispatch_priority(ctx)
                 if result:
                     await self.bus.publish_outbound(result)
                 continue
-            task = asyncio.create_task(self._dispatch(msg))
-            self._active_tasks.setdefault(msg.session_key, []).append(task)
-            task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
+            task = asyncio.create_task(self._dispatch(msg, active_key=active_key))
+            self._active_tasks.setdefault(active_key, []).append(task)
+            task.add_done_callback(lambda t, k=active_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
-    async def _dispatch(self, msg: InboundMessage) -> None:
+    async def _dispatch(self, msg: InboundMessage, *, active_key: str | None = None) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
-        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+        session_key = active_key or self.sessions.resolve_active_key(msg.session_key)
+        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
         async with lock, gate:
             try:
@@ -416,7 +430,10 @@ class AgentLoop:
                         ))
 
                 response = await self._process_message(
-                    msg, on_stream=on_stream, on_stream_end=on_stream_end,
+                    msg,
+                    session_key=session_key,
+                    on_stream=on_stream,
+                    on_stream_end=on_stream_end,
                 )
                 if response is not None:
                     await self.bus.publish_outbound(response)
@@ -426,10 +443,10 @@ class AgentLoop:
                         content="", metadata=msg.metadata or {},
                     ))
             except asyncio.CancelledError:
-                logger.info("Task cancelled for session {}", msg.session_key)
+                logger.info("Task cancelled for session {}", session_key)
                 raise
             except Exception as e:
-                logger.exception("Error processing message for session {}", msg.session_key)
+                logger.exception("Error processing message for session {}", session_key)
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
                     content=f"Sorry, I encountered an error: {type(e).__name__}: {e}",
@@ -473,10 +490,10 @@ class AgentLoop:
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
                                 else ("cli", msg.chat_id))
             logger.info("Processing system message from {}", msg.sender_id)
-            key = f"{channel}:{chat_id}"
+            key = msg.session_key_override or self.sessions.resolve_active_key(f"{channel}:{chat_id}")
             session = self.sessions.get_or_create(key)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), key)
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
@@ -497,7 +514,8 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        key = session_key or msg.session_key
+        base_key = session_key or msg.session_key
+        key = self.sessions.resolve_active_key(base_key)
         session = self.sessions.get_or_create(key)
 
         # Slash commands
@@ -508,7 +526,7 @@ class AgentLoop:
 
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), key)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()

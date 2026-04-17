@@ -251,6 +251,8 @@ def build_status_content(
     context_reasoning_reserve: int | None = None,
     context_safety_buffer: int | None = None,
     context_source: str | None = None,
+    session_key: str | None = None,
+    branch: str | None = None,
 ) -> str:
     """Build a human-readable runtime status snapshot."""
     uptime_s = int(time.time() - start_time)
@@ -272,8 +274,11 @@ def build_status_content(
         f"\U0001f4ca Tokens: {last_in} in / {last_out} out",
         f"\U0001f4da Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}%)",
     ]
+    session_label = session_key or "(unknown)"
+    branch_label = branch or "main"
     lines.extend([
-        f"\U0001f4ac Session: {session_msg_count} messages",
+        f"\U0001f4ac Session: {session_label}",
+        f"\U0001f33f Branch: {branch_label} ({session_msg_count} messages)",
         f"\u23f1 Uptime: {uptime}",
     ])
     return "\n".join(lines)

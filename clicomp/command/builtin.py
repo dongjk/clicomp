@@ -13,6 +13,7 @@ from clicomp import __version__
 from clicomp.bus.events import OutboundMessage
 from clicomp.command.router import CommandContext, CommandRouter
 from clicomp.providers.base import GenerationSettings
+from clicomp.session.manager import SessionManager
 from clicomp.utils.helpers import build_status_content
 
 
@@ -193,7 +194,9 @@ async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
 async def cmd_status(ctx: CommandContext) -> OutboundMessage:
     """Build an outbound status message for a session."""
     loop = ctx.loop
-    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    base_key, _ = SessionManager.split_branch_key(ctx.key)
+    active_key = loop.sessions.resolve_active_key(base_key)
+    session = ctx.session if ctx.session and ctx.session.key == active_key else loop.sessions.get_or_create(active_key)
     snapshot: dict[str, int | str] | None = None
     ctx_est = 0
     try:
@@ -218,6 +221,8 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
             context_reasoning_reserve=int(snapshot["reasoning_reserve"]) if snapshot else None,
             context_safety_buffer=int(snapshot["safety_buffer"]) if snapshot else None,
             context_source=str(snapshot["source"]) if snapshot else None,
+            session_key=base_key,
+            branch=loop.sessions.branch_name_from_key(active_key),
         ),
         metadata={"render_as": "text"},
     )
@@ -457,6 +462,37 @@ async def cmd_show(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_branch(ctx: CommandContext) -> OutboundMessage:
+    """List branches for the current session or switch/create one."""
+    loop = ctx.loop
+    base_key, _ = SessionManager.split_branch_key(ctx.key)
+    requested = (ctx.args or "").strip()
+
+    if not requested:
+        current = loop.sessions.get_current_branch(base_key)
+        branches = loop.sessions.list_branches(base_key)
+        lines = [f"Session: {base_key}", f"Current branch: {current}", "", "Branches:"]
+        for item in branches:
+            marker = " (current)" if item.get("current") else ""
+            lines.append(f"- {item['branch']}{marker}")
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="\n".join(lines),
+            metadata={"render_as": "text"},
+        )
+
+    session, created = loop.sessions.switch_branch(base_key, requested)
+    branch = loop.sessions.branch_name_from_key(session.key)
+    verb = "Created and switched to" if created else "Switched to"
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=f"{verb} branch: {branch}",
+        metadata={"render_as": "text"},
+    )
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     lines = [
@@ -464,7 +500,7 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/new — Start a new conversation",
         "/stop — Stop the current task",
         "/restart — Restart the bot",
-        "/status — Show bot status",
+        "/status — Show bot status, current session, and branch",
         "/model — List models or switch model",
         "/model <name> — Switch to a model",
         "/think — Show current reasoning level",
@@ -472,6 +508,8 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/history — Show current session message history",
         "/show <n> — Show the full content of one history message",
         "/del 1-3,7,10-12 — Delete selected history lines from current session",
+        "/branch — List branches for the current session",
+        "/branch <name> — Create/switch to a branch; /branch main returns to main",
         "/help — Show available commands",
     ]
     return OutboundMessage(
@@ -491,6 +529,8 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
     router.exact("/history", cmd_history)
+    router.exact("/branch", cmd_branch)
+    router.prefix("/branch ", cmd_branch)
     router.prefix("/show ", cmd_show)
     router.prefix("/del ", cmd_del)
     router.exact("/model", cmd_model)
