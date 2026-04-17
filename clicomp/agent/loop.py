@@ -19,7 +19,6 @@ from clicomp.agent.subagent import SubagentManager
 from clicomp.agent.tools.cron import CronTool
 from clicomp.agent.skills import BUILTIN_SKILLS_DIR
 from clicomp.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
-from clicomp.agent.tools.message import MessageTool
 from clicomp.agent.tools.registry import ToolRegistry
 from clicomp.agent.tools.shell import ExecTool
 from clicomp.agent.tools.spawn import SpawnTool
@@ -141,7 +140,6 @@ class AgentLoop:
             ))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
-        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(
@@ -178,9 +176,6 @@ class AgentLoop:
         session_key: str | None = None,
     ) -> None:
         """Update context for all tools that need routing info."""
-        if tool := self.tools.get("message"):
-            if hasattr(tool, "set_context"):
-                tool.set_context(channel, chat_id, message_id)
         if tool := self.tools.get("spawn"):
             if hasattr(tool, "set_context"):
                 tool.set_context(channel, chat_id, session_key or f"{channel}:{chat_id}")
@@ -527,9 +522,6 @@ class AgentLoop:
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), key)
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool):
-                message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
         initial_messages = self.context.build_messages(
@@ -570,9 +562,6 @@ class AgentLoop:
             session.metadata["azure_previous_response_id"] = azure_response_id
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
-
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
-            return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)

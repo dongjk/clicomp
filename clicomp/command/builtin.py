@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from clicomp import __version__
@@ -125,17 +126,96 @@ def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
     return f"{label} {content}{suffix}"
 
 
-def _parse_history_line_no(spec: str) -> tuple[int | None, str | None]:
-    """Parse a single 1-based history line number."""
+def _parse_history_line_no(spec: str) -> tuple[int | str | None, str | None]:
+    """Parse a single 1-based history line number or system id like S1."""
     text = (spec or "").strip()
     if not text:
-        return None, "Usage: /show <history line number>"
+        return None, "Usage: /show <history line number|Sx>"
+    upper = text.upper()
+    if upper.startswith("S") and upper[1:].isdigit():
+        line_no = int(upper[1:])
+        if line_no <= 0:
+            return None, f"Line number must be >= 1: {spec}"
+        return f"S{line_no}", None
     if not text.isdigit():
         return None, f"Invalid line number: {spec}"
     line_no = int(text)
     if line_no <= 0:
         return None, f"Line number must be >= 1: {spec}"
     return line_no, None
+
+
+def _read_text_if_exists(path: Path) -> str:
+    """Read a UTF-8 file if it exists, else return empty text."""
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def _system_history_entries(ctx: CommandContext) -> list[dict[str, str]]:
+    """Build visible system/injected context entries for /history and /show."""
+    loop = ctx.loop
+    workspace = loop.workspace
+    builder = loop.context
+
+    entries: list[dict[str, str]] = [
+        {
+            "id": "S1",
+            "label": "Built-in identity prompt",
+            "content": builder._get_identity(),
+        }
+    ]
+
+    bootstrap_files = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    next_id = 2
+    for filename in bootstrap_files:
+        path = workspace / filename
+        content = _read_text_if_exists(path)
+        if content:
+            entries.append({
+                "id": f"S{next_id}",
+                "label": filename,
+                "content": content,
+            })
+            next_id += 1
+
+    memory_content = _read_text_if_exists(workspace / "memory" / "MEMORY.md")
+    if memory_content:
+        entries.append({
+            "id": f"S{next_id}",
+            "label": "memory/MEMORY.md",
+            "content": memory_content,
+        })
+        next_id += 1
+
+    always_skills = builder.skills.get_always_skills()
+    always_content = builder.skills.load_skills_for_context(always_skills) if always_skills else ""
+    if always_content:
+        entries.append({
+            "id": f"S{next_id}",
+            "label": "Always-loaded skills",
+            "content": always_content,
+        })
+        next_id += 1
+
+    skills_summary = builder.skills.build_skills_summary()
+    if skills_summary:
+        entries.append({
+            "id": f"S{next_id}",
+            "label": "Skills summary",
+            "content": skills_summary,
+        })
+        next_id += 1
+
+    entries.append({
+        "id": f"S{next_id}",
+        "label": "Runtime context",
+        "content": builder._build_runtime_context(ctx.msg.channel, ctx.msg.chat_id, builder.timezone),
+    })
+    return entries
 
 
 def _available_models(loop) -> list[str]:
@@ -404,12 +484,20 @@ async def cmd_history(ctx: CommandContext) -> OutboundMessage:
     loop = ctx.loop
     session = ctx.session or loop.sessions.get_or_create(ctx.key)
     history = session.get_history(max_messages=0)
+    system_entries = _system_history_entries(ctx)
 
-    if not history:
-        content = "No message history yet."
-    else:
-        lines = [f"{idx}. {_history_preview(message)}" for idx, message in enumerate(history, start=1)]
-        content = "\n".join(lines)
+    lines: list[str] = []
+    if system_entries:
+        for entry in system_entries:
+            preview = _history_preview({"role": "system", "content": entry["content"]})
+            lines.append(f"{entry['id']}. {preview} — {entry['label']}")
+
+    if history:
+        if lines:
+            lines.append("")
+        lines.extend(f"{idx}. {_history_preview(message)}" for idx, message in enumerate(history, start=1))
+
+    content = "\n".join(lines) if lines else "No message history yet."
 
     return OutboundMessage(
         channel=ctx.msg.channel,
@@ -442,6 +530,24 @@ async def cmd_show(ctx: CommandContext) -> OutboundMessage:
         )
 
     assert line_no is not None
+    if isinstance(line_no, str) and line_no.upper().startswith("S"):
+        system_entries = _system_history_entries(ctx)
+        target = next((entry for entry in system_entries if entry["id"] == line_no.upper()), None)
+        if target is None:
+            return OutboundMessage(
+                channel=ctx.msg.channel,
+                chat_id=ctx.msg.chat_id,
+                content=f"System line not found: {line_no}",
+                metadata={"render_as": "text"},
+            )
+        content = target["content"] or "(empty)"
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=f"{target['id']}. [S] {target['label']}\n\n{content}",
+            metadata={"render_as": "text"},
+        )
+
     if line_no > len(history):
         return OutboundMessage(
             channel=ctx.msg.channel,
@@ -493,6 +599,46 @@ async def cmd_branch(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_tools(ctx: CommandContext) -> OutboundMessage:
+    """List currently registered model tools."""
+    loop = ctx.loop
+    tool_defs = loop.tools.get_definitions() if getattr(loop, "tools", None) else []
+
+    if not tool_defs:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="No tools are currently registered.",
+            metadata={"render_as": "text"},
+        )
+
+    lines = [f"Registered tools: {len(tool_defs)}", ""]
+    for idx, tool_def in enumerate(tool_defs, start=1):
+        if tool_def.get("type") == "function":
+            fn = tool_def.get("function", {})
+            name = str(fn.get("name") or f"tool_{idx}")
+            desc = " ".join(str(fn.get("description") or "").split()) or "(no description)"
+            props = ((fn.get("parameters") or {}).get("properties") or {})
+            required = (fn.get("parameters") or {}).get("required") or []
+            arg_names = ", ".join(props.keys()) if props else "(no args)"
+            req_text = ", ".join(required) if required else "(none)"
+            lines.append(f"- {name}")
+            lines.append(f"  desc: {desc}")
+            lines.append(f"  args: {arg_names}")
+            lines.append(f"  required: {req_text}")
+        else:
+            lines.append(f"- {tool_def.get('type', 'unknown')}")
+        if idx < len(tool_defs):
+            lines.append("")
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content="\n".join(lines),
+        metadata={"render_as": "text"},
+    )
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     lines = [
@@ -506,10 +652,11 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/think — Show current reasoning level",
         "/think <none|low|medium|high> — Set reasoning level",
         "/history — Show current session message history",
-        "/show <n> — Show the full content of one history message",
+        "/show <n|Sx> — Show the full content of one history or injected-system message",
         "/del 1-3,7,10-12 — Delete selected history lines from current session",
         "/branch — List branches for the current session",
         "/branch <name> — Create/switch to a branch; /branch main returns to main",
+        "/tools — List currently registered model tools",
         "/help — Show available commands",
     ]
     return OutboundMessage(
@@ -528,6 +675,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/new", cmd_new)
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
+    router.exact("/tools", cmd_tools)
     router.exact("/history", cmd_history)
     router.exact("/branch", cmd_branch)
     router.prefix("/branch ", cmd_branch)
