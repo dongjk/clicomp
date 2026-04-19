@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import clicomp.cli.commands as cli_commands
 from clicomp.agent.loop import AgentLoop
 from clicomp.bus.queue import MessageBus
 from clicomp.providers.base import GenerationSettings, LLMProvider, LLMResponse
@@ -125,3 +126,27 @@ async def test_tools_command_lists_registered_tools(loop: AgentLoop):
     assert listed is not None
     assert "Registered tools:" in listed.content
     assert "- read_file" in listed.content
+
+
+@pytest.mark.asyncio
+async def test_repeat_command_emits_repeat_metadata(loop: AgentLoop):
+    resp = await loop.process_direct("/repeat 3 continue your work", session_key="cli:direct", channel="cli", chat_id="direct")
+    assert resp is not None
+    assert resp.content == "Auto-repeat armed: 3 × continue your work"
+    assert resp.metadata.get("_repeat") == {"remaining": 3, "message": "continue your work"}
+
+
+def test_extract_repeat_state_helper():
+    assert cli_commands._extract_repeat_state({"_repeat": {"remaining": 2, "message": "go"}}) == (2, "go")
+    assert cli_commands._extract_repeat_state({}) is None
+
+
+def test_schedule_repeat_turn_helper():
+    remaining, message, next_msg = cli_commands._schedule_repeat_turn((2, "go"), 0, "")
+    assert (remaining, message, next_msg) == (1, "go", "go")
+
+    remaining, message, next_msg = cli_commands._schedule_repeat_turn(None, remaining, message)
+    assert (remaining, message, next_msg) == (0, "go", "go")
+
+    remaining, message, next_msg = cli_commands._schedule_repeat_turn(None, remaining, message)
+    assert next_msg == ""

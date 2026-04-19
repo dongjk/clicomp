@@ -505,6 +505,35 @@ def _normalize_cli_session_key(session_id: str) -> str:
     return text if ":" in text else f"cli:{text}"
 
 
+def _extract_repeat_state(metadata: dict | None) -> tuple[int, str] | None:
+    """Parse repeat state emitted by /repeat."""
+    data = (metadata or {}).get("_repeat")
+    if not isinstance(data, dict):
+        return None
+    remaining = data.get("remaining")
+    message = data.get("message")
+    if not isinstance(remaining, int) or remaining <= 0:
+        return None
+    if not isinstance(message, str) or not message.strip():
+        return None
+    return remaining, message
+
+
+def _schedule_repeat_turn(
+    repeat_state: tuple[int, str] | None,
+    repeat_remaining: int,
+    repeat_message: str,
+) -> tuple[int, str, str]:
+    """Apply repeat state and return the next auto message, if any."""
+    if repeat_state is not None:
+        repeat_remaining, repeat_message = repeat_state
+    if repeat_remaining > 0 and repeat_message:
+        next_message = repeat_message
+        repeat_remaining -= 1
+        return repeat_remaining, repeat_message, next_message
+    return repeat_remaining, repeat_message, ""
+
+
 # ============================================================================
 # Agent Commands
 # ============================================================================
@@ -595,38 +624,50 @@ def agent(
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
-            renderer = StreamRenderer(render_markdown=markdown) if stream else None
-            local_thinking = ThinkingSpinner() if not stream else None
             direct_channel, direct_chat_id = normalized_session_id.split(":", 1)
-            if local_thinking:
-                local_thinking.__enter__()
-            response = await agent_loop.process_direct(
-                message,
-                normalized_session_id,
-                channel=direct_channel,
-                chat_id=direct_chat_id,
-                on_progress=_cli_progress,
-                on_stream=renderer.on_delta if renderer else None,
-                on_stream_end=renderer.on_end if renderer else None,
-            )
-            if local_thinking:
-                local_thinking.__exit__(None, None, None)
-            if response and response.metadata is not None:
-                response.metadata.setdefault("_session", normalized_session_id)
-            if renderer:
-                if not renderer.streamed:
-                    await renderer.close()
+            pending_message = message
+            repeat_remaining = 0
+            repeat_message = ""
+
+            while pending_message:
+                renderer = StreamRenderer(render_markdown=markdown) if stream else None
+                local_thinking = ThinkingSpinner() if not stream else None
+                if local_thinking:
+                    local_thinking.__enter__()
+                response = await agent_loop.process_direct(
+                    pending_message,
+                    normalized_session_id,
+                    channel=direct_channel,
+                    chat_id=direct_chat_id,
+                    on_progress=_cli_progress,
+                    on_stream=renderer.on_delta if renderer else None,
+                    on_stream_end=renderer.on_end if renderer else None,
+                )
+                if local_thinking:
+                    local_thinking.__exit__(None, None, None)
+                if response and response.metadata is not None:
+                    response.metadata.setdefault("_session", normalized_session_id)
+                if renderer:
+                    if not renderer.streamed:
+                        await renderer.close()
+                        _print_agent_response(
+                            response.content if response else "",
+                            render_markdown=markdown,
+                            metadata=response.metadata if response else None,
+                        )
+                else:
                     _print_agent_response(
                         response.content if response else "",
                         render_markdown=markdown,
                         metadata=response.metadata if response else None,
                     )
-            else:
-                _print_agent_response(
-                    response.content if response else "",
-                    render_markdown=markdown,
-                    metadata=response.metadata if response else None,
+
+                repeat_remaining, repeat_message, pending_message = _schedule_repeat_turn(
+                    _extract_repeat_state(response.metadata if response else None),
+                    repeat_remaining,
+                    repeat_message,
                 )
+
             await agent_loop.close_mcp()
 
         asyncio.run(run_once())
@@ -660,6 +701,8 @@ def agent(
             turn_done.set()
             turn_response: list[tuple[str, dict]] = []
             renderer: StreamRenderer | None = None
+            repeat_remaining = 0
+            repeat_message = ""
 
             async def _consume_outbound():
                 while True:
@@ -723,11 +766,17 @@ def agent(
             try:
                 while True:
                     try:
-                        _flush_pending_tty_input()
-                        user_input = await _read_interactive_input_async()
-                        command = user_input.strip()
-                        if not command:
-                            continue
+                        if repeat_remaining > 0 and repeat_message:
+                            user_input = repeat_message
+                            command = user_input.strip()
+                            repeat_remaining -= 1
+                            await _print_interactive_line(f"[auto] {user_input}", {"_session": normalized_session_id})
+                        else:
+                            _flush_pending_tty_input()
+                            user_input = await _read_interactive_input_async()
+                            command = user_input.strip()
+                            if not command:
+                                continue
 
                         if _is_exit_command(command):
                             _restore_terminal()
@@ -754,6 +803,9 @@ def agent(
 
                         if turn_response:
                             content, meta = turn_response[0]
+                            repeat_state = _extract_repeat_state(meta)
+                            if repeat_state is not None:
+                                repeat_remaining, repeat_message = repeat_state
                             if content and not meta.get("_streamed"):
                                 if renderer:
                                     await renderer.close()

@@ -145,6 +145,25 @@ def _parse_history_line_no(spec: str) -> tuple[int | str | None, str | None]:
     return line_no, None
 
 
+def _parse_repeat_args(spec: str) -> tuple[int | None, str | None, str | None]:
+    """Parse /repeat arguments as <count> <message>."""
+    text = (spec or "").strip()
+    if not text:
+        return None, None, "Usage: /repeat <count> <message>"
+    parts = text.split(None, 1)
+    if len(parts) != 2:
+        return None, None, "Usage: /repeat <count> <message>"
+    raw_count, message = parts[0], parts[1].strip()
+    if not raw_count.isdigit():
+        return None, None, f"Invalid repeat count: {raw_count}"
+    count = int(raw_count)
+    if count <= 0:
+        return None, None, "Repeat count must be >= 1"
+    if not message:
+        return None, None, "Usage: /repeat <count> <message>"
+    return count, message, None
+
+
 def _read_text_if_exists(path: Path) -> str:
     """Read a UTF-8 file if it exists, else return empty text."""
     if not path.exists() or not path.is_file():
@@ -599,6 +618,29 @@ async def cmd_branch(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_repeat(ctx: CommandContext) -> OutboundMessage:
+    """Arm CLI auto-repeat for the next N turns."""
+    count, message, error = _parse_repeat_args(ctx.args)
+    if error:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=error,
+            metadata={"render_as": "text"},
+        )
+
+    assert count is not None and message is not None
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=f"Auto-repeat armed: {count} × {message}",
+        metadata={
+            "render_as": "text",
+            "_repeat": {"remaining": count, "message": message},
+        },
+    )
+
+
 async def cmd_tools(ctx: CommandContext) -> OutboundMessage:
     """List currently registered model tools."""
     loop = ctx.loop
@@ -656,6 +698,7 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
         "/del 1-3,7,10-12 — Delete selected history lines from current session",
         "/branch — List branches for the current session",
         "/branch <name> — Create/switch to a branch; /branch main returns to main",
+        "/repeat <n> <message> — CLI: auto-send <message> after each turn, n times",
         "/tools — List currently registered model tools",
         "/help — Show available commands",
     ]
@@ -676,6 +719,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
     router.exact("/tools", cmd_tools)
+    router.prefix("/repeat ", cmd_repeat)
     router.exact("/history", cmd_history)
     router.exact("/branch", cmd_branch)
     router.prefix("/branch ", cmd_branch)
