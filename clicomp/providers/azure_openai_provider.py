@@ -333,13 +333,17 @@ class AzureOpenAIProvider(LLMProvider):
         for item in output:
             if not isinstance(item, dict):
                 continue
-            content = item.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") in {"output_text", "text"}:
-                        text = block.get("text")
-                        if isinstance(text, str):
-                            texts.append(text)
+            if item.get("type") == "message":
+                content = item.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") in {"output_text", "text"}:
+                            text = block.get("text")
+                            if isinstance(text, str):
+                                texts.append(text)
+            output_text = item.get("output_text")
+            if isinstance(output_text, str) and output_text:
+                texts.append(output_text)
         return "".join(texts) or None
 
     @staticmethod
@@ -493,11 +497,38 @@ class AzureOpenAIProvider(LLMProvider):
         on_content_delta: Callable[[str], Awaitable[None]] | None,
     ) -> LLMResponse:
         content_parts: list[str] = []
+        seen_visible_text: set[tuple[str, int]] = set()
         tool_call_buffers: dict[str, dict[str, str]] = {}
+        item_to_call_id: dict[str, str] = {}
         tool_call_order: list[str] = []
         finish_reason = "stop"
         usage: dict[str, int] = {}
         response_id: str | None = None
+        completed_response: dict[str, Any] | None = None
+        output_items: list[dict[str, Any]] = []
+
+        def _append_visible_text(text: str | None, *, item_id: str | None = None, content_index: int | None = None) -> None:
+            if not isinstance(text, str) or not text:
+                return
+            if item_id is not None and content_index is not None:
+                key = (item_id, content_index)
+                if key in seen_visible_text:
+                    return
+                seen_visible_text.add(key)
+            content_parts.append(text)
+
+        def _ensure_tool_buf(raw_call_id: Any, *, item_id: Any = None) -> dict[str, str] | None:
+            call_id = str(raw_call_id or "").strip()
+            item_key = str(item_id or "").strip()
+            if not call_id and item_key:
+                call_id = item_to_call_id.get(item_key, item_key)
+            if not call_id:
+                return None
+            if item_key:
+                item_to_call_id[item_key] = call_id
+            if call_id not in tool_call_buffers:
+                tool_call_order.append(call_id)
+            return tool_call_buffers.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
 
         async for line in response.aiter_lines():
             if not line.startswith("data:"):
@@ -517,41 +548,70 @@ class AzureOpenAIProvider(LLMProvider):
                     content_parts.append(delta)
                     if on_content_delta:
                         await on_content_delta(delta)
+            elif event_type == "response.output_text.done":
+                text = event.get("text")
+                _append_visible_text(
+                    text,
+                    item_id=str(event.get("item_id") or "") or None,
+                    content_index=event.get("content_index"),
+                )
+            elif event_type == "response.refusal.done":
+                refusal = event.get("refusal")
+                _append_visible_text(
+                    refusal,
+                    item_id=str(event.get("item_id") or "") or None,
+                    content_index=event.get("content_index"),
+                )
+            elif event_type in {"response.content_part.added", "response.content_part.done"}:
+                part = event.get("part") or {}
+                if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                    _append_visible_text(
+                        part.get("text"),
+                        item_id=str(event.get("item_id") or "") or None,
+                        content_index=event.get("content_index"),
+                    )
             elif event_type == "response.output_item.added":
                 item = event.get("item") or {}
-                if item.get("type") == "function_call":
-                    key = str(item.get("call_id") or item.get("id") or uuid.uuid4().hex[:9])
-                    if key not in tool_call_buffers:
-                        tool_call_order.append(key)
-                    buf = tool_call_buffers.setdefault(key, {
-                        "id": key,
-                        "name": "",
-                        "arguments": "",
-                    })
-                    if item.get("name"):
-                        buf["name"] = str(item.get("name") or "")
-                    if item.get("arguments"):
-                        buf["arguments"] = str(item.get("arguments") or "")
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    buf = _ensure_tool_buf(item.get("call_id") or item.get("id"), item_id=item.get("id"))
+                    if buf is not None:
+                        if item.get("name"):
+                            buf["name"] = str(item.get("name") or "")
+                        if item.get("arguments"):
+                            buf["arguments"] = str(item.get("arguments") or "")
+            elif event_type == "response.output_item.done":
+                item = event.get("item") or {}
+                if isinstance(item, dict):
+                    output_items.append(item)
+                    if item.get("type") == "message":
+                        text = self._extract_text_from_output([item])
+                        if text:
+                            _append_visible_text(text)
+                    elif item.get("type") == "function_call":
+                        buf = _ensure_tool_buf(item.get("call_id") or item.get("id"), item_id=item.get("id"))
+                        if buf is not None:
+                            if item.get("name"):
+                                buf["name"] = str(item.get("name") or "")
+                            if item.get("arguments"):
+                                buf["arguments"] = str(item.get("arguments") or "")
             elif event_type == "response.function_call_arguments.delta":
-                call_id = str(event.get("call_id") or event.get("item_id") or "")
-                if call_id:
-                    if call_id not in tool_call_buffers:
-                        tool_call_order.append(call_id)
-                    buf = tool_call_buffers.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
+                buf = _ensure_tool_buf(event.get("call_id"), item_id=event.get("item_id"))
+                if buf is not None:
                     delta = event.get("delta")
                     if isinstance(delta, str):
                         buf["arguments"] += delta
             elif event_type == "response.function_call_arguments.done":
-                call_id = str(event.get("call_id") or event.get("item_id") or "")
-                if call_id:
-                    if call_id not in tool_call_buffers:
-                        tool_call_order.append(call_id)
-                    buf = tool_call_buffers.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
+                buf = _ensure_tool_buf(event.get("call_id") or event.get("item_id"), item_id=event.get("item_id"))
+                if buf is not None:
+                    name = event.get("name")
+                    if isinstance(name, str) and name:
+                        buf["name"] = name
                     args = event.get("arguments")
                     if isinstance(args, str):
                         buf["arguments"] = args
             elif event_type == "response.completed":
                 resp = event.get("response") or {}
+                completed_response = resp if isinstance(resp, dict) else None
                 response_id = resp.get("id") or response_id
                 finish_reason = str(resp.get("status") or "stop")
                 usage = self._extract_usage(resp)
@@ -562,6 +622,14 @@ class AzureOpenAIProvider(LLMProvider):
                     content=f"Azure OpenAI API Error: {json.dumps(error, ensure_ascii=False)}",
                     finish_reason="error",
                 )
+
+        if not content_parts and completed_response:
+            fallback_output = completed_response.get("output") or []
+            fallback_text = self._extract_text_from_output(fallback_output)
+            if fallback_text:
+                content_parts.append(fallback_text)
+            if not output_items and isinstance(fallback_output, list):
+                output_items = [item for item in fallback_output if isinstance(item, dict)]
 
         ordered_buffers = [tool_call_buffers[key] for key in tool_call_order if key in tool_call_buffers]
         merged_buffers: list[dict[str, str]] = []
@@ -598,6 +666,9 @@ class AzureOpenAIProvider(LLMProvider):
                 )
             )
 
+        if not tool_calls and output_items:
+            tool_calls = self._extract_tool_calls(output_items)
+
         parsed = LLMResponse(
             content="".join(content_parts) or None,
             tool_calls=tool_calls,
@@ -605,7 +676,14 @@ class AzureOpenAIProvider(LLMProvider):
             usage=usage,
         )
         setattr(parsed, "provider_response_id", response_id)
-        setattr(parsed, "provider_output_items", [])
+        setattr(parsed, "provider_output_items", output_items)
+        if parsed.content is None and not parsed.tool_calls:
+            logger.warning(
+                "Azure stream parsed empty final response: finish_reason={}, response_id={}, output_items={}",
+                finish_reason,
+                response_id or "-",
+                len(output_items),
+            )
         return parsed
 
     def estimate_prompt_tokens(

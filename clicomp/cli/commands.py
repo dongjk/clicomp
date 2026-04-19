@@ -720,6 +720,8 @@ def agent(
                                 )
                             continue
                         if msg.metadata.get("_streamed"):
+                            if msg.content:
+                                turn_response.append((msg.content, dict(msg.metadata or {})))
                             turn_done.set()
                             continue
 
@@ -814,6 +816,11 @@ def agent(
                                 )
                         elif renderer and not renderer.streamed:
                             await renderer.close()
+                            await _print_interactive_response(
+                                "The model completed without producing a visible response.",
+                                render_markdown=markdown,
+                                metadata={"render_as": "text"},
+                            )
                     except KeyboardInterrupt:
                         _restore_terminal()
                         console.print("\nGoodbye!")

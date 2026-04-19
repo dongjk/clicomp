@@ -212,7 +212,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
+    ) -> tuple[str | None, list[str], list[dict], bool]:
         """Run the agent iteration loop.
 
         *on_stream*: called with each content delta during streaming.
@@ -224,24 +224,31 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-
+        final_round_streamed = False
+        empty_visible_response_retries = 0
+ 
         # Wrap on_stream with stateful think-tag filter so downstream
         # consumers (CLI, channels) never see <think> blocks.
         _raw_stream = on_stream
         _stream_buf = ""
-
+        _round_streamed_visible = False
+ 
         async def _filtered_stream(delta: str) -> None:
-            nonlocal _stream_buf
+            nonlocal _stream_buf, _round_streamed_visible
             from clicomp.utils.helpers import strip_think
             prev_clean = strip_think(_stream_buf)
             _stream_buf += delta
             new_clean = strip_think(_stream_buf)
             incremental = new_clean[len(prev_clean):]
-            if incremental and _raw_stream:
-                await _raw_stream(incremental)
+            if incremental:
+                _round_streamed_visible = True
+                if _raw_stream:
+                    await _raw_stream(incremental)
+
 
         while iteration < self.max_iterations:
             iteration += 1
+            _round_streamed_visible = False
             logger.info("Agent loop iteration {} started (session={}, channel={}, chat_id={})", iteration, message_id or "-", channel, chat_id)
 
             tool_defs = self.tools.get_definitions()
@@ -315,8 +322,31 @@ class AgentLoop:
                     messages[-1].setdefault("_meta", {}).update(provider_meta)
 
                 if not valid_tool_calls:
-                    final_content = self._strip_think(response.content)
-                    break
+                    clean = self._strip_think(response.content)
+                    if clean:
+                        final_round_streamed = _round_streamed_visible
+                        final_content = clean
+                        break
+                    logger.warning(
+                        "Agent loop iteration {} produced only malformed/empty tool calls and no visible content; retrying once",
+                        iteration,
+                    )
+                    empty_visible_response_retries += 1
+                    if empty_visible_response_retries >= 2 or iteration >= self.max_iterations:
+                        final_content = (
+                            "The model returned malformed tool calls and no visible response. "
+                            "This usually indicates a provider parsing issue."
+                        )
+                        break
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous turn produced no usable tool call and no visible answer. "
+                            "Please continue by either calling a valid tool or replying with a concise, user-visible answer."
+                        ),
+                        "_meta": {"ephemeral_repair": True},
+                    })
+                    continue
 
                 # Re-bind tool context right before execution so that
                 # concurrent sessions don't clobber each other's routing.
@@ -351,12 +381,46 @@ class AgentLoop:
                     logger.error("LLM returned error: {}", (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
+                if clean is None:
+                    logger.warning(
+                        "Agent loop iteration {} returned no visible content and no tool calls "
+                        "(finish_reason={}, streamed_visible={}); retrying once",
+                        iteration,
+                        response.finish_reason,
+                        _round_streamed_visible,
+                    )
+                    empty_visible_response_retries += 1
+                    if empty_visible_response_retries >= 2 or iteration >= self.max_iterations:
+                        final_content = (
+                            "The model completed without producing a visible response. "
+                            "This may indicate an empty model reply or a provider parsing issue."
+                        )
+                        break
+                    messages = self.context.add_assistant_message(
+                        messages, clean, reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    )
+                    if provider_meta:
+                        messages[-1].setdefault("_meta", {}).update(provider_meta)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous turn produced no visible answer. "
+                            "Do not output hidden reasoning only. "
+                            "Please either provide a concise final answer for the user, "
+                            "or call a tool if more work is needed."
+                        ),
+                        "_meta": {"ephemeral_repair": True},
+                    })
+                    continue
+                empty_visible_response_retries = 0
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
                 if provider_meta:
                     messages[-1].setdefault("_meta", {}).update(provider_meta)
+                final_round_streamed = _round_streamed_visible
                 final_content = clean
                 break
 
@@ -367,7 +431,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, final_round_streamed
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -496,7 +560,7 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(
+            final_content, _, all_msgs, _ = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
@@ -544,7 +608,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        final_content, _, all_msgs, final_round_streamed = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
@@ -567,7 +631,7 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         meta = dict(msg.metadata or {})
-        if on_stream is not None:
+        if on_stream is not None and final_round_streamed:
             meta["_streamed"] = True
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
@@ -625,6 +689,8 @@ class AgentLoop:
         from datetime import datetime
         for m in messages[skip:]:
             entry = dict(m)
+            if entry.get("_meta", {}).get("ephemeral_repair"):
+                continue  # internal recovery prompt; do not persist to session history
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages - they poison session context
