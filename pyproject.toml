@@ -35,6 +35,7 @@ dependencies = [
     "openai>=2.8.0",
     "tiktoken>=0.12.0,<1.0.0",
     "readability-lxml>=0.8.1,<1.0.0",
+    "azure-identity>=1.25.3",
 ]
 
 [project.optional-dependencies]
