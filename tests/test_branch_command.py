@@ -7,7 +7,7 @@ import pytest
 import clicomp.cli.commands as cli_commands
 from clicomp.agent.loop import AgentLoop
 from clicomp.bus.queue import MessageBus
-from clicomp.providers.base import GenerationSettings, LLMProvider, LLMResponse
+from clicomp.providers.base import GenerationSettings, LLMProvider, LLMResponse, ToolCallRequest
 
 
 class DummyProvider(LLMProvider):
@@ -118,6 +118,80 @@ async def test_history_includes_system_entries_and_show_sx(loop: AgentLoop):
     runtime = await loop.process_direct(f"/show {runtime_id}", session_key=base_key, channel="cli", chat_id="direct")
     assert runtime is not None
     assert "Runtime context" in runtime.content or "Current Time:" in runtime.content
+
+
+@pytest.mark.asyncio
+async def test_history_shows_unnumbered_tool_call_action_before_tool_result(loop: AgentLoop):
+    base_key = "cli:direct"
+    session = loop.sessions.get_or_create(base_key)
+    tool_call = ToolCallRequest(
+        id="call_123",
+        name="read_file",
+        arguments={"path": "/tmp/example.txt"},
+    ).to_openai_tool_call()
+    session.messages.extend([
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": "我要读取文件", "tool_calls": [tool_call]},
+        {"role": "tool", "content": "file content", "tool_call_id": "call_123", "name": "read_file"},
+        {"role": "assistant", "content": "done"},
+    ])
+    loop.sessions.save(session)
+
+    history = await loop.process_direct("/history", session_key=base_key, channel="cli", chat_id="direct")
+    assert history is not None
+    lines = history.content.splitlines()
+    call_line = next(line for line in lines if "[CALL]" in line)
+    tool_line = next(line for line in lines if "[T] file content" in line)
+    assert call_line.startswith("   [CALL] read_file(")
+    assert not call_line.lstrip().split(" ", 1)[0].rstrip(".").isdigit()
+    assert lines.index(call_line) < lines.index(tool_line)
+    assert "path" in call_line
+
+    shown = await loop.process_direct("/show 2", session_key=base_key, channel="cli", chat_id="direct")
+    assert shown is not None
+    assert "Tool calls:" in shown.content
+    assert "[CALL 1] read_file" in shown.content
+    assert "id: call_123" in shown.content
+    assert '"path": "/tmp/example.txt"' in shown.content
+
+    deleted = await loop.process_direct("/del 2", session_key=base_key, channel="cli", chat_id="direct")
+    assert deleted is not None
+    assert "Deleted 2 history line(s)" in deleted.content
+    assert "paired tool line(s) included" in deleted.content
+    history_after_delete = await loop.process_direct("/history", session_key=base_key, channel="cli", chat_id="direct")
+    assert history_after_delete is not None
+    assert "[CALL]" not in history_after_delete.content
+    assert "[T] file content" not in history_after_delete.content
+    assert "1. [U] read it" in history_after_delete.content
+    assert "2. [A] done" in history_after_delete.content
+
+
+@pytest.mark.asyncio
+async def test_del_tool_result_also_removes_declaring_assistant(loop: AgentLoop):
+    base_key = "cli:direct"
+    session = loop.sessions.get_or_create(base_key)
+    tool_call = ToolCallRequest(
+        id="call_456",
+        name="exec",
+        arguments={"command": "echo hi"},
+    ).to_openai_tool_call()
+    session.messages.extend([
+        {"role": "user", "content": "run it"},
+        {"role": "assistant", "content": "running", "tool_calls": [tool_call]},
+        {"role": "tool", "content": "hi", "tool_call_id": "call_456", "name": "exec"},
+        {"role": "assistant", "content": "finished"},
+    ])
+    loop.sessions.save(session)
+
+    deleted = await loop.process_direct("/del 3", session_key=base_key, channel="cli", chat_id="direct")
+    assert deleted is not None
+    assert "Deleted 2 history line(s)" in deleted.content
+    history = await loop.process_direct("/history", session_key=base_key, channel="cli", chat_id="direct")
+    assert history is not None
+    assert "[CALL]" not in history.content
+    assert "[T] hi" not in history.content
+    assert "1. [U] run it" in history.content
+    assert "2. [A] finished" in history.content
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,70 @@ def _history_view_indices(session) -> list[int]:
     return list(range(offset, offset + len(sliced)))
 
 
+def _assistant_tool_call_ids(message: dict[str, Any]) -> set[str]:
+    """Return tool call ids declared by an assistant message."""
+    if message.get("role") != "assistant":
+        return set()
+    ids: set[str] = set()
+    for tool_call in message.get("tool_calls") or []:
+        if isinstance(tool_call, dict) and tool_call.get("id"):
+            ids.add(str(tool_call["id"]))
+    return ids
+
+
+def _expand_delete_indices_for_tool_pairs(
+    messages: list[dict[str, Any]],
+    delete_indices: set[int],
+) -> set[int]:
+    """Expand deletions so assistant tool_calls and matching tool results stay paired.
+
+    Tool call action lines shown in /history are derived from the assistant message
+    and are not separately numbered.  If the assistant side is deleted, delete the
+    corresponding tool result messages too.  Conversely, deleting a tool result must
+    also delete the assistant message that declared it; otherwise providers may see
+    orphaned/illegal tool-call history and /history may be forced to hide earlier
+    messages at the next legal boundary.
+    """
+    expanded = {idx for idx in delete_indices if 0 <= idx < len(messages)}
+    if not expanded:
+        return expanded
+
+    # call_id -> assistant index declaring it
+    declaring_assistant: dict[str, int] = {}
+    assistant_call_ids: dict[int, set[str]] = {}
+    for idx, message in enumerate(messages):
+        ids = _assistant_tool_call_ids(message)
+        if not ids:
+            continue
+        assistant_call_ids[idx] = ids
+        for call_id in ids:
+            declaring_assistant[call_id] = idx
+
+    call_ids_to_delete: set[str] = set()
+    for idx in list(expanded):
+        message = messages[idx]
+        call_ids_to_delete.update(assistant_call_ids.get(idx, set()))
+        if message.get("role") == "tool" and message.get("tool_call_id"):
+            tool_call_id = str(message["tool_call_id"])
+            assistant_idx = declaring_assistant.get(tool_call_id)
+            if assistant_idx is not None:
+                expanded.add(assistant_idx)
+                call_ids_to_delete.update(assistant_call_ids.get(assistant_idx, {tool_call_id}))
+            else:
+                call_ids_to_delete.add(tool_call_id)
+
+    if not call_ids_to_delete:
+        return expanded
+
+    for idx, message in enumerate(messages):
+        if idx in assistant_call_ids and assistant_call_ids[idx] & call_ids_to_delete:
+            expanded.add(idx)
+        if message.get("role") == "tool" and str(message.get("tool_call_id") or "") in call_ids_to_delete:
+            expanded.add(idx)
+
+    return expanded
+
+
 _HISTORY_ROLE_LABEL = {
     "user": "[U]",
     "assistant": "[A]",
@@ -108,22 +172,90 @@ def _stringify_history_content(content: Any) -> str:
     return str(content)
 
 
+def _truncate_history_text(text: str, max_chars: int = 120) -> tuple[str, str]:
+    """Normalize and truncate one-line history text; return text and suffix."""
+    raw_len = len(text)
+    content = " ".join(text.split())
+    truncated = len(content) > max_chars
+    if truncated:
+        content = content[: max_chars - 3].rstrip() + "..."
+    if not content:
+        content = "(empty)"
+    suffix = f" ({raw_len} chars)" if truncated else ""
+    return content, suffix
+
+
 def _history_preview(message: dict[str, Any], max_chars: int = 120) -> str:
     """Render one compact one-line preview for /history."""
     role = str(message.get("role") or "assistant")
     label = _HISTORY_ROLE_LABEL.get(role, "[?]")
 
     raw_content = _stringify_history_content(message.get("content"))
-    char_len = len(raw_content)
-
-    content = " ".join(raw_content.split())
-    truncated = len(content) > max_chars
-    if truncated:
-        content = content[: max_chars - 3].rstrip() + "..."
-    if not content:
-        content = "(empty)"
-    suffix = f" ({char_len} chars)" if truncated else ""
+    content, suffix = _truncate_history_text(raw_content, max_chars=max_chars)
     return f"{label} {content}{suffix}"
+
+
+def _iter_tool_call_parts(message: dict[str, Any]) -> list[dict[str, str]]:
+    """Extract normalized tool-call display parts from an assistant message."""
+    if message.get("role") != "assistant":
+        return []
+
+    parts: list[dict[str, str]] = []
+    for tool_call in message.get("tool_calls") or []:
+        if not isinstance(tool_call, dict):
+            continue
+
+        call_id = str(tool_call.get("id") or "").strip()
+        function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+        name = str(function.get("name") or tool_call.get("name") or "").strip()
+        if not name:
+            name = "(unknown tool)"
+
+        arguments = function.get("arguments", tool_call.get("arguments", ""))
+        if isinstance(arguments, str):
+            args_text = arguments.strip()
+        elif arguments is None:
+            args_text = ""
+        else:
+            args_text = json.dumps(arguments, ensure_ascii=False)
+
+        parts.append({"id": call_id, "name": name, "arguments": args_text})
+    return parts
+
+
+def _history_tool_call_previews(message: dict[str, Any], max_chars: int = 120) -> list[str]:
+    """Render assistant tool calls as unnumbered /history action lines."""
+    lines: list[str] = []
+    for part in _iter_tool_call_parts(message):
+        args_text = part["arguments"]
+        call_text = f"{part['name']}({args_text})" if args_text else f"{part['name']}()"
+        if part["id"]:
+            call_text = f"{call_text} id={part['id']}"
+        content, suffix = _truncate_history_text(call_text, max_chars=max_chars)
+        lines.append(f"   [CALL] {content}{suffix}")
+    return lines
+
+
+def _show_tool_calls(message: dict[str, Any]) -> str:
+    """Render full assistant tool-call details for /show."""
+    blocks: list[str] = []
+    for idx, part in enumerate(_iter_tool_call_parts(message), start=1):
+        lines = [f"[CALL {idx}] {part['name']}"]
+        if part["id"]:
+            lines.append(f"id: {part['id']}")
+        if part["arguments"]:
+            args_text = part["arguments"]
+            try:
+                parsed = json.loads(args_text)
+                args_text = json.dumps(parsed, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            lines.append("arguments:")
+            lines.append(args_text)
+        else:
+            lines.append("arguments: {}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def _parse_history_line_no(spec: str) -> tuple[int | str | None, str | None]:
@@ -461,7 +593,8 @@ async def cmd_del(ctx: CommandContext) -> OutboundMessage:
             metadata={"render_as": "text"},
         )
 
-    delete_indices = {visible_indices[line_no - 1] for line_no in selected}
+    requested_delete_indices = {visible_indices[line_no - 1] for line_no in selected}
+    delete_indices = _expand_delete_indices_for_tool_pairs(session.messages, requested_delete_indices)
     if not delete_indices:
         return OutboundMessage(
             channel=ctx.msg.channel,
@@ -486,11 +619,13 @@ async def cmd_del(ctx: CommandContext) -> OutboundMessage:
     except Exception:
         pass
 
+    extra_deleted = len(delete_indices) - len(requested_delete_indices)
+    paired_note = f" ({extra_deleted} paired tool line(s) included)." if extra_deleted else "."
     return OutboundMessage(
         channel=ctx.msg.channel,
         chat_id=ctx.msg.chat_id,
         content=(
-            f"Deleted {len(delete_indices)} history line(s). "
+            f"Deleted {len(delete_indices)} history line(s){paired_note} "
             f"Current visible history: {len(session.get_history(max_messages=0))} line(s). "
             f"Estimated context: {ctx_est} tokens."
         ),
@@ -514,7 +649,9 @@ async def cmd_history(ctx: CommandContext) -> OutboundMessage:
     if history:
         if lines:
             lines.append("")
-        lines.extend(f"{idx}. {_history_preview(message)}" for idx, message in enumerate(history, start=1))
+        for idx, message in enumerate(history, start=1):
+            lines.append(f"{idx}. {_history_preview(message)}")
+            lines.extend(_history_tool_call_previews(message))
 
     content = "\n".join(lines) if lines else "No message history yet."
 
@@ -579,6 +716,9 @@ async def cmd_show(ctx: CommandContext) -> OutboundMessage:
     role = str(message.get("role") or "assistant")
     label = _HISTORY_ROLE_LABEL.get(role, "[?]")
     content = _stringify_history_content(message.get("content")) or "(empty)"
+    tool_calls = _show_tool_calls(message)
+    if tool_calls:
+        content = f"{content}\n\nTool calls:\n\n{tool_calls}"
 
     return OutboundMessage(
         channel=ctx.msg.channel,
