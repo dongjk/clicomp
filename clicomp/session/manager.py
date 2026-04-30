@@ -140,6 +140,9 @@ class SessionManager:
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.archive_dir = ensure_dir(self.sessions_dir / "archive")
         self._cache: dict[str, Session] = {}
+        # In-memory per-base-key branch tracking — NOT persisted.
+        # Each window/TUI instance maintains its own branch choice independently.
+        self._current_branch_inmemory: dict[str, str] = {}
 
     @staticmethod
     def split_branch_key(key: str) -> tuple[str, str]:
@@ -175,29 +178,13 @@ class SessionManager:
         return self.sessions_dir / f"{safe_key}.branches.json"
 
     def get_current_branch(self, base_key: str) -> str:
-        """Return the currently selected branch for a base session."""
-        path = self._get_branch_meta_path(base_key)
-        if not path.exists():
-            return self.BRANCH_MAIN
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            branch = str(data.get("current") or self.BRANCH_MAIN).strip() or self.BRANCH_MAIN
-            return branch
-        except Exception as e:
-            logger.warning("Failed to load branch metadata for {}: {}", base_key, e)
-            return self.BRANCH_MAIN
+        """Return the in-memory branch for a base session (does not persist)."""
+        return self._current_branch_inmemory.get(base_key, self.BRANCH_MAIN)
 
     def set_current_branch(self, base_key: str, branch: str) -> None:
-        """Persist the currently selected branch for a base session."""
+        """Store the branch for a base session in memory (not persisted)."""
         branch_name = (branch or self.BRANCH_MAIN).strip() or self.BRANCH_MAIN
-        path = self._get_branch_meta_path(base_key)
-        payload = {
-            "base_key": base_key,
-            "current": branch_name,
-            "updated_at": datetime.now().isoformat(),
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._current_branch_inmemory[base_key] = branch_name
 
     def resolve_active_key(self, key: str) -> str:
         """Resolve a user-facing base session key to its active branch session key."""
