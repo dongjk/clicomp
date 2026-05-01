@@ -268,7 +268,6 @@ def build_status_content(
     ctx_used_str = f"{context_tokens_estimate // 1000}k" if context_tokens_estimate >= 1000 else str(context_tokens_estimate)
     ctx_total_str = f"{ctx_total // 1024}k" if ctx_total > 0 else "n/a"
     lines = [
-        f"\U0001f408 clicomp v{version}",
         f"\U0001f9e0 Model: {model}",
         f"\U0001f914 Thinking: {reasoning_effort or 'none'}",
         f"\U0001f4ca Tokens: {last_in} in / {last_out} out",
